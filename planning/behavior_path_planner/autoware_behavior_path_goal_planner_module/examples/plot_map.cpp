@@ -18,6 +18,7 @@
 #include <ament_index_cpp/get_package_share_directory.hpp>
 #include <autoware/behavior_path_goal_planner_module/manager.hpp>
 #include <autoware/behavior_path_goal_planner_module/pull_over_planner/shift_pull_over.hpp>
+#include <autoware/behavior_path_goal_planner_module/pull_over_planner/geometric_pull_over.hpp>
 #include <autoware/behavior_path_planner/behavior_path_planner_node.hpp>
 #include <autoware/behavior_path_planner_common/data_manager.hpp>
 #include <autoware/behavior_path_planner_common/utils/parking_departure/utils.hpp>
@@ -570,7 +571,9 @@ int main(int argc, char ** argv)
   std::vector<PullOverPath> candidates;
   for (const auto & goal_candidate : goal_candidates) {
     auto shift_pull_over_planner = autoware::behavior_path_planner::ShiftPullOver(
-      *node, goal_planner_parameter, lane_departure_checker);
+    //   *node, goal_planner_parameter, lane_departure_checker);
+    // auto shift_pull_over_planner = autoware::behavior_path_planner::GeometricPullOver(
+      *node, goal_planner_parameter, lane_departure_checker, true);
     const auto pull_over_path_opt =
       shift_pull_over_planner.plan(goal_candidate, 0, planner_data, reference_path);
     if (pull_over_path_opt) {
