@@ -570,9 +570,7 @@ int main(int argc, char ** argv)
 
   std::vector<PullOverPath> candidates;
   for (const auto & goal_candidate : goal_candidates) {
-    auto shift_pull_over_planner = autoware::behavior_path_planner::ShiftPullOver(
-    //   *node, goal_planner_parameter, lane_departure_checker);
-    // auto shift_pull_over_planner = autoware::behavior_path_planner::GeometricPullOver(
+    auto shift_pull_over_planner = autoware::behavior_path_planner::GeometricPullOver(
       *node, goal_planner_parameter, lane_departure_checker, true);
     const auto pull_over_path_opt =
       shift_pull_over_planner.plan(goal_candidate, 0, planner_data, reference_path);
