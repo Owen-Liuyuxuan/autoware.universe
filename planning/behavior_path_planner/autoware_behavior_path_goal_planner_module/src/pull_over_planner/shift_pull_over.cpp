@@ -25,6 +25,15 @@
 #include <memory>
 #include <vector>
 
+// for writing the svg file
+#include <fstream>
+#include <iostream>
+// for the geometry types
+#include <autoware/universe_utils/geometry/boost_geometry.hpp>
+// for the svg mapper
+#include <boost/geometry/io/svg/svg_mapper.hpp>
+#include <boost/geometry/io/svg/write.hpp>
+
 namespace autoware::behavior_path_planner
 {
 ShiftPullOver::ShiftPullOver(
@@ -207,7 +216,7 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
   autoware::motion_utils::insertOrientation(shifted_path.path.points, true);
 
   // set same orientation, because the reference center line orientation is not same to the
-  shifted_path.path.points.back().point.pose.orientation = shift_end_pose.orientation;
+  // shifted_path.path.points.back().point.pose.orientation = shift_end_pose.orientation;
 
   // for debug. result of shift is not equal to the target
   const Pose actual_shift_end_pose = shifted_path.path.points.back().point.pose;
@@ -215,11 +224,21 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
   // interpolate between shift end pose to goal pose
   std::vector<Pose> interpolated_poses =
     utils::interpolatePose(shifted_path.path.points.back().point.pose, goal_pose, 0.5);
-  for (const auto & pose : interpolated_poses) {
-    PathPointWithLaneId p = shifted_path.path.points.back();
-    p.point.pose = pose;
+  const auto back_point = shifted_path.path.points.back();
+  // shifted_path.path.points.clear();
+
+  std::cerr << "before) shifted_path.path.points.size() = " << shifted_path.path.points.size()
+            << std::endl;
+  for (size_t i = 0; i < interpolated_poses.size(); ++i) {
+    PathPointWithLaneId p = back_point;
+    p.point.pose = interpolated_poses.at(i);
     shifted_path.path.points.push_back(p);
   }
+  // PathPointWithLaneId p = back_point;
+  // p.point.pose = interpolated_poses.back();
+  // shifted_path.path.points.push_back(p);
+  std::cerr << "after) shifted_path.path.points.size() = " << shifted_path.path.points.size()
+            << ", interpolated_poses.size() = " << interpolated_poses.size() << std::endl;
 
   // set goal pose with velocity 0
   {
@@ -232,6 +251,7 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
     }
     shifted_path.path.points.push_back(p);
   }
+  
 
   // set lane_id and velocity to shifted_path
   for (size_t i = path_shifter.getShiftLines().front().start_idx;
@@ -263,6 +283,12 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
     getPlannerType(), id, {shifted_path.path}, path_shifter.getShiftLines().front().start,
     goal_candidate, {std::make_pair(pull_over_velocity, 0)});
 
+  // tmp
+  // auto pull_over_path_opt = PullOverPath::create(
+  //   getPlannerType(), id, {processed_prev_module_path.value()},
+  //   path_shifter.getShiftLines().front().start, goal_candidate,
+  //   {std::make_pair(pull_over_velocity, 0)});
+
   if (!pull_over_path_opt) {
     return {};
   }
@@ -274,6 +300,10 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
   pull_over_path.debug_poses.push_back(
     road_lane_reference_path_to_shift_end.points.back().point.pose);
   pull_over_path.debug_poses.push_back(prev_module_path_terminal_pose);
+
+  for (const auto & interpolated_pose : interpolated_poses) {
+    pull_over_path.debug_poses.push_back(interpolated_pose);
+  }
 
   // check if the parking path will leave drivable area and lanes
   const bool is_in_parking_lots = std::invoke([&]() -> bool {
@@ -311,6 +341,9 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
     return {};
   }
 
+  std::cerr << "pull_over_path.partial_paths.front().points.size() = "
+            << pull_over_path.partial_paths().front().points.size() << std::endl;
+            
   return pull_over_path;
 }
 
