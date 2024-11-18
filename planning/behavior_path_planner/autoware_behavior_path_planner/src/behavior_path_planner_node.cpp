@@ -713,11 +713,9 @@ PathWithLaneId::SharedPtr BehaviorPathPlannerNode::getPath(
   PathWithLaneId connected_path;
   const auto module_status_ptr_vec = planner_manager->getSceneModuleStatus();
 
-  return path;
-
-  // const auto resampled_path = utils::resamplePathWithSpline(
-  //   *path, planner_data->parameters.output_path_interval, keepInputPoints(module_status_ptr_vec));
-  // return std::make_shared<PathWithLaneId>(resampled_path);
+  const auto resampled_path = utils::resamplePathWithSpline(
+    *path, planner_data->parameters.output_path_interval, keepInputPoints(module_status_ptr_vec));
+  return std::make_shared<PathWithLaneId>(resampled_path);
 }
 
 // This is a temporary process until motion planning can take the terminal pose into account

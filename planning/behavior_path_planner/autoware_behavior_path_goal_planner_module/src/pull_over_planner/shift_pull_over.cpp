@@ -216,7 +216,7 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
   autoware::motion_utils::insertOrientation(shifted_path.path.points, true);
 
   // set same orientation, because the reference center line orientation is not same to the
-  // shifted_path.path.points.back().point.pose.orientation = shift_end_pose.orientation;
+  shifted_path.path.points.back().point.pose.orientation = shift_end_pose.orientation;
 
   // for debug. result of shift is not equal to the target
   const Pose actual_shift_end_pose = shifted_path.path.points.back().point.pose;
@@ -224,57 +224,44 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
   // interpolate between shift end pose to goal pose
   std::vector<Pose> interpolated_poses =
     utils::interpolatePose(shifted_path.path.points.back().point.pose, goal_pose, 0.5);
-  const auto back_point = shifted_path.path.points.back();
-  // shifted_path.path.points.clear();
-
-  std::cerr << "before) shifted_path.path.points.size() = " << shifted_path.path.points.size()
-            << std::endl;
   for (size_t i = 0; i < interpolated_poses.size(); ++i) {
-    PathPointWithLaneId p = back_point;
+    PathPointWithLaneId p{};
     p.point.pose = interpolated_poses.at(i);
     shifted_path.path.points.push_back(p);
   }
-  // PathPointWithLaneId p = back_point;
-  // p.point.pose = interpolated_poses.back();
-  // shifted_path.path.points.push_back(p);
-  std::cerr << "after) shifted_path.path.points.size() = " << shifted_path.path.points.size()
-            << ", interpolated_poses.size() = " << interpolated_poses.size() << std::endl;
+
+  // combine road lanes and shoulder lanes to find closest lanelet id
+  const auto lanes = std::invoke([&]() -> lanelet::ConstLanelets {
+    auto lanes = road_lanes;
+    lanes.insert(lanes.end(), shoulder_lanes.begin(), shoulder_lanes.end());
+    return std::move(lanes);
+  });
 
   // set goal pose with velocity 0
   {
     PathPointWithLaneId p{};
     p.point.longitudinal_velocity_mps = 0.0;
     p.point.pose = goal_pose;
-    p.lane_ids = shifted_path.path.points.back().lane_ids;
-    for (const auto & lane : shoulder_lanes) {
-      p.lane_ids.push_back(lane.id());
+    lanelet::Lanelet goal_lanelet;
+    if (lanelet::utils::query::getClosestLanelet(lanes, goal_pose, &goal_lanelet)) {
+      p.lane_ids.push_back(goal_lanelet.id());
+    } else {
+      p.lane_ids = shifted_path.path.points.back().lane_ids;
     }
     shifted_path.path.points.push_back(p);
   }
-  
 
   // set lane_id and velocity to shifted_path
   for (size_t i = path_shifter.getShiftLines().front().start_idx;
        i < shifted_path.path.points.size() - 1; ++i) {
     auto & point = shifted_path.path.points.at(i);
-    // set velocity
     point.point.longitudinal_velocity_mps =
       std::min(point.point.longitudinal_velocity_mps, static_cast<float>(pull_over_velocity));
-
-    // add target lanes to points after shift start
-    // add road lane_ids if not found
-    for (const auto id : shifted_path.path.points.back().lane_ids) {
-      if (std::find(point.lane_ids.begin(), point.lane_ids.end(), id) == point.lane_ids.end()) {
-        point.lane_ids.push_back(id);
-      }
-    }
-    // add shoulder lane_id if not found
-    for (const auto & lane : shoulder_lanes) {
-      if (
-        std::find(point.lane_ids.begin(), point.lane_ids.end(), lane.id()) ==
-        point.lane_ids.end()) {
-        point.lane_ids.push_back(lane.id());
-      }
+    lanelet::Lanelet lanelet;
+    if (lanelet::utils::query::getClosestLanelet(lanes, point.point.pose, &lanelet)) {
+      point.lane_ids = {lanelet.id()};  // overwrite lane_ids
+    } else {
+      point.lane_ids = shifted_path.path.points.at(i - 1).lane_ids;
     }
   }
 
@@ -282,12 +269,6 @@ std::optional<PullOverPath> ShiftPullOver::generatePullOverPath(
   auto pull_over_path_opt = PullOverPath::create(
     getPlannerType(), id, {shifted_path.path}, path_shifter.getShiftLines().front().start,
     goal_candidate, {std::make_pair(pull_over_velocity, 0)});
-
-  // tmp
-  // auto pull_over_path_opt = PullOverPath::create(
-  //   getPlannerType(), id, {processed_prev_module_path.value()},
-  //   path_shifter.getShiftLines().front().start, goal_candidate,
-  //   {std::make_pair(pull_over_velocity, 0)});
 
   if (!pull_over_path_opt) {
     return {};

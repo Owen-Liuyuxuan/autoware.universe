@@ -374,7 +374,7 @@ std::vector<Pose> interpolatePose(
       interpolated_poses.at(i).position, i < interpolated_poses.size() - 1
                                            ? interpolated_poses.at(i + 1).position
                                            : end_pose.position);
-    interpolated_poses.at(i).orientation = tf2::createQuaternionFromYaw(yaw);
+    interpolated_poses.at(i).orientation = autoware::universe_utils::createQuaternionFromYaw(yaw);
   }
 
   return interpolated_poses;
