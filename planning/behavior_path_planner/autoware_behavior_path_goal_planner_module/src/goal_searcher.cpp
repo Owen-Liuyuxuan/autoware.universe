@@ -133,6 +133,7 @@ GoalCandidates GoalSearcher::search(const std::shared_ptr<const PlannerData> & p
 
   const auto no_parking_area_polygons = getNoParkingAreaPolygons(pull_over_lanes);
   const auto no_stopping_area_polygons = getNoStoppingAreaPolygons(pull_over_lanes);
+  const auto bus_stop_area_polygons = goal_planner_utils::getBusStopAreaPolygons(pull_over_lanes);
 
   std::vector<Pose> original_search_poses{};  // for search area visualizing
   size_t goal_id = 0;
@@ -171,6 +172,12 @@ GoalCandidates GoalSearcher::search(const std::shared_ptr<const PlannerData> & p
 
       const auto transformed_vehicle_footprint =
         transformVector(vehicle_footprint_, autoware::universe_utils::pose2transform(search_pose));
+
+      if (
+        parameters_.bus_stop_area.use_bus_stop_area &&
+        !goal_planner_utils::isWithinAreas(transformed_vehicle_footprint, bus_stop_area_polygons)) {
+        continue;
+      }
 
       if (goal_planner_utils::isIntersectingAreas(
             transformed_vehicle_footprint, no_parking_area_polygons)) {

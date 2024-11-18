@@ -18,6 +18,7 @@
 #include "autoware/behavior_path_planner_common/utils/utils.hpp"
 
 #include <autoware/universe_utils/ros/marker_helper.hpp>
+#include <lanelet2_extension/regulatory_elements/bus_stop_area.hpp>
 #include <lanelet2_extension/utility/message_conversion.hpp>
 #include <lanelet2_extension/utility/query.hpp>
 #include <lanelet2_extension/utility/utilities.hpp>
@@ -283,6 +284,18 @@ bool isWithinAreas(
     }
   }
   return false;
+}
+
+std::vector<lanelet::BasicPolygon2d> getBusStopAreaPolygons(const lanelet::ConstLanelets & lanes)
+{
+  std::vector<lanelet::BasicPolygon2d> area_polygons{};
+  for (const auto & bus_stop_area_reg_elem : lanelet::utils::query::busStopAreas(lanes)) {
+    for (const auto & area : bus_stop_area_reg_elem->busStopAreas()) {
+      const auto & area_poly = lanelet::utils::to2D(area).basicPolygon();
+      area_polygons.push_back(area_poly);
+    }
+  }
+  return area_polygons;
 }
 
 bool checkObjectsCollision(
