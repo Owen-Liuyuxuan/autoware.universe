@@ -236,6 +236,7 @@ private:
     // collision detector
     // need to be shared_ptr to be used in planner and goal searcher
     std::shared_ptr<OccupancyGridBasedCollisionDetector> occupancy_grid_map;
+    std::shared_ptr<GoalSearcherBase> goal_searcher;
 
     const BehaviorModuleOutput & getPreviousModuleOutput() const { return previous_module_output; }
     const ModuleStatus & getCurrentStatus() const { return current_status; }
@@ -244,6 +245,7 @@ private:
     void update(
       const GoalPlannerParameters & parameters, const PlannerData & planner_data,
       const ModuleStatus & current_status, const BehaviorModuleOutput & previous_module_output,
+      const std::shared_ptr<GoalSearcherBase> goal_searcher_,
       const autoware::universe_utils::LinearRing2d & vehicle_footprint);
 
   private:
@@ -361,6 +363,7 @@ private:
     const std::shared_ptr<OccupancyGridBasedCollisionDetector> occupancy_grid_map) const;
 
   // goal seach
+  Pose calcRefinedGoal(const Pose & goal_pose) const;
   GoalCandidates generateGoalCandidates() const;
 
   // stop or decelerate

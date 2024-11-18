@@ -51,8 +51,7 @@ public:
 private:
   void countObjectsToAvoid(
     GoalCandidates & goal_candidates, const PredictedObjects & objects,
-    const std::shared_ptr<const PlannerData> & planner_data,
-    const Pose & reference_goal_pose) const;
+    const std::shared_ptr<const PlannerData> & planner_data) const;
   void createAreaPolygons(
     std::vector<Pose> original_search_poses,
     const std::shared_ptr<const PlannerData> & planner_data);
