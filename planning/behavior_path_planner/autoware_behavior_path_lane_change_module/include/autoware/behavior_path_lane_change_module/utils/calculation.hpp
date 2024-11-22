@@ -75,7 +75,7 @@ double calc_dist_to_last_fit_width(
  * of the maximum lane change preparation duration and the maximum velocity of the ego vehicle.
  *
  * @param common_data_ptr Shared pointer to a CommonData structure, which should include:
- *  - `lc_param_ptr->lane_change_prepare_duration`: The duration allowed for lane change
+ *  - `lc_param_ptr->maximum_prepare_duration`: The maximum duration allowed for lane change
  * preparation.
  *  - `bpp_param_ptr->max_vel`: The maximum velocity of the ego vehicle.
  *
@@ -129,6 +129,10 @@ double calc_phase_length(
 std::vector<double> calc_lon_acceleration_samples(
   const CommonDataPtr & common_data_ptr, const double max_path_velocity,
   const double prepare_duration);
+
+double calc_actual_prepare_duration(
+  const CommonDataPtr & common_data_ptr, const double current_velocity,
+  const double active_signal_duration);
 
 std::vector<PhaseMetrics> calc_prepare_phase_metrics(
   const CommonDataPtr & common_data_ptr, const double current_velocity,

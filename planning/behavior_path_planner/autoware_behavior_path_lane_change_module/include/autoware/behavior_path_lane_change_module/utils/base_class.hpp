@@ -68,7 +68,7 @@ public:
 
   virtual void update_lanes(const bool is_approved) = 0;
 
-  virtual void update_transient_data() = 0;
+  virtual void update_transient_data(const bool is_approved) = 0;
 
   virtual void update_filtered_objects() = 0;
 
@@ -292,6 +292,7 @@ protected:
 
   mutable StopWatch<std::chrono::milliseconds> stop_watch_;
   mutable lane_change::Debug lane_change_debug_;
+  mutable std::optional<rclcpp::Time> signal_activation_time_{std::nullopt};
 
   rclcpp::Logger logger_ = utils::lane_change::getLogger(getModuleTypeStr());
   mutable rclcpp::Clock clock_{RCL_ROS_TIME};
