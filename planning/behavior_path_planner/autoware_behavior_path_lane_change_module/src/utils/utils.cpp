@@ -613,7 +613,7 @@ std::vector<PoseWithVelocityStamped> convertToPredictedPath(
   const auto duration = lane_change_path.info.duration.sum();
   const auto prepare_time = lane_change_path.info.duration.prepare;
   const auto & minimum_lane_changing_velocity =
-    lane_change_parameters.minimum_lane_changing_velocity;
+    lane_change_parameters.trajectory.min_lane_changing_velocity;
 
   const auto nearest_seg_idx =
     autoware::motion_utils::findFirstNearestSegmentIndexWithSoftConstraints(
@@ -741,13 +741,13 @@ bool isParkedObject(
 
 bool is_delay_lane_change(
   const CommonDataPtr & common_data_ptr, const LaneChangePath & lane_change_path,
-  const std::vector<ExtendedPredictedObject> & target_objects,
-  CollisionCheckDebugMap & object_debug)
+  const ExtendedPredictedObjects & target_objects, CollisionCheckDebugMap & object_debug)
 {
   const auto & current_lane_path = common_data_ptr->current_lanes_path;
+  const auto & delay_lc_param = common_data_ptr->lc_param_ptr->delay;
 
   if (
-    target_objects.empty() || lane_change_path.path.points.empty() ||
+    !delay_lc_param.enable || target_objects.empty() || lane_change_path.path.points.empty() ||
     current_lane_path.points.empty()) {
     return false;
   }
@@ -760,11 +760,9 @@ bool is_delay_lane_change(
   };
 
   const auto ego_vel = common_data_ptr->get_ego_speed();
-  const auto min_lon_acc = common_data_ptr->lc_param_ptr->min_longitudinal_acc;
+  const auto min_lon_acc = common_data_ptr->lc_param_ptr->trajectory.min_longitudinal_acc;
   const auto gap_threshold = std::abs((ego_vel * ego_vel) / (2 * min_lon_acc));
-  auto is_sufficient_gap = [&gap_threshold](
-                             const ExtendedPredictedObject & current_obj,
-                             const ExtendedPredictedObject & next_obj) {
+  auto is_sufficient_gap = [&gap_threshold](const auto & current_obj, const auto & next_obj) {
     const auto curr_obj_half_length = current_obj.shape.dimensions.x;
     const auto next_obj_half_length = next_obj.shape.dimensions.x;
     const auto dist_current_to_next = next_obj.dist_from_ego - current_obj.dist_from_ego;
@@ -772,10 +770,7 @@ bool is_delay_lane_change(
     return gap_length > gap_threshold;
   };
 
-  const auto & delay_lc_param = common_data_ptr->lc_param_ptr->delay;
-
-  auto it = target_objects.begin();
-  for (; it < target_objects.end(); ++it) {
+  for (auto it = target_objects.begin(); it < target_objects.end(); ++it) {
     if (is_near_end(*it)) break;
 
     if (it->dist_from_ego < lane_change_path.info.length.lane_changing) continue;
@@ -800,132 +795,6 @@ bool is_delay_lane_change(
   return false;
 }
 
-bool passed_parked_objects(
-  const CommonDataPtr & common_data_ptr, const LaneChangePath & lane_change_path,
-  const std::vector<ExtendedPredictedObject> & objects, CollisionCheckDebugMap & object_debug)
-{
-  const auto route_handler = *common_data_ptr->route_handler_ptr;
-  const auto lane_change_parameters = *common_data_ptr->lc_param_ptr;
-  const auto & object_check_min_road_shoulder_width =
-    lane_change_parameters.delay.min_road_shoulder_width;
-  const auto & object_shiftable_ratio_threshold =
-    lane_change_parameters.delay.th_parked_vehicle_shift_ratio;
-  const auto & current_lane_path = common_data_ptr->current_lanes_path;
-
-  if (objects.empty() || lane_change_path.path.points.empty() || current_lane_path.points.empty()) {
-    return true;
-  }
-
-  const auto leading_obj_idx = getLeadingStaticObjectIdx(
-    route_handler, lane_change_path, objects, object_check_min_road_shoulder_width,
-    object_shiftable_ratio_threshold);
-  if (!leading_obj_idx) {
-    return true;
-  }
-
-  const auto & leading_obj = objects.at(*leading_obj_idx);
-  auto debug = utils::path_safety_checker::createObjectDebug(leading_obj);
-  const auto leading_obj_poly =
-    autoware::universe_utils::toPolygon2d(leading_obj.initial_pose, leading_obj.shape);
-  if (leading_obj_poly.outer().empty()) {
-    return true;
-  }
-
-  const auto & current_path_end = current_lane_path.points.back().point.pose.position;
-  const auto dist_to_path_end = [&](const auto & src_point) {
-    if (common_data_ptr->lanes_ptr->current_lane_in_goal_section) {
-      const auto goal_pose = route_handler.getGoalPose();
-      return motion_utils::calcSignedArcLength(
-        current_lane_path.points, src_point, goal_pose.position);
-    }
-    return motion_utils::calcSignedArcLength(current_lane_path.points, src_point, current_path_end);
-  };
-
-  const auto min_dist_to_end_of_current_lane = std::invoke([&]() {
-    auto min_dist_to_end_of_current_lane = std::numeric_limits<double>::max();
-    for (const auto & point : leading_obj_poly.outer()) {
-      const auto obj_p = universe_utils::createPoint(point.x(), point.y(), 0.0);
-      const auto dist = dist_to_path_end(obj_p);
-      min_dist_to_end_of_current_lane = std::min(dist, min_dist_to_end_of_current_lane);
-    }
-    return min_dist_to_end_of_current_lane;
-  });
-
-  // If there are still enough length after the target object, we delay the lane change
-  if (min_dist_to_end_of_current_lane <= common_data_ptr->transient_data.current_dist_buffer.min) {
-    return true;
-  }
-
-  const auto current_pose = common_data_ptr->get_ego_pose();
-  const auto dist_ego_to_obj = motion_utils::calcSignedArcLength(
-    current_lane_path.points, current_pose.position, leading_obj.initial_pose.position);
-
-  if (dist_ego_to_obj < lane_change_path.info.length.lane_changing) {
-    return true;
-  }
-
-  debug.second.unsafe_reason = "delay lane change";
-  utils::path_safety_checker::updateCollisionCheckDebugMap(object_debug, debug, false);
-  return false;
-}
-
-std::optional<size_t> getLeadingStaticObjectIdx(
-  const RouteHandler & route_handler, const LaneChangePath & lane_change_path,
-  const std::vector<ExtendedPredictedObject> & objects,
-  const double object_check_min_road_shoulder_width, const double object_shiftable_ratio_threshold)
-{
-  const auto & path = lane_change_path.path;
-
-  if (path.points.empty() || objects.empty()) {
-    return {};
-  }
-
-  const auto & lane_change_start = lane_change_path.info.lane_changing_start;
-  const auto & path_end = path.points.back();
-
-  double dist_lc_start_to_leading_obj = 0.0;
-  std::optional<size_t> leading_obj_idx = std::nullopt;
-  for (size_t obj_idx = 0; obj_idx < objects.size(); ++obj_idx) {
-    const auto & obj = objects.at(obj_idx);
-    const auto & obj_pose = obj.initial_pose;
-
-    // ignore non-static object
-    // TODO(shimizu): parametrize threshold
-    const double obj_vel_norm = std::hypot(obj.initial_twist.linear.x, obj.initial_twist.linear.y);
-    if (obj_vel_norm > 1.0) {
-      continue;
-    }
-
-    // ignore non-parked object
-    if (!isParkedObject(
-          path, route_handler, obj, object_check_min_road_shoulder_width,
-          object_shiftable_ratio_threshold)) {
-      continue;
-    }
-
-    const double dist_back_to_obj = autoware::motion_utils::calcSignedArcLength(
-      path.points, path_end.point.pose.position, obj_pose.position);
-    if (dist_back_to_obj > 0.0) {
-      // object is not on the lane change path
-      continue;
-    }
-
-    const double dist_lc_start_to_obj = autoware::motion_utils::calcSignedArcLength(
-      path.points, lane_change_start.position, obj_pose.position);
-    if (dist_lc_start_to_obj < 0.0) {
-      // object is on the lane changing path or behind it. It will be detected in safety check
-      continue;
-    }
-
-    if (dist_lc_start_to_obj > dist_lc_start_to_leading_obj) {
-      dist_lc_start_to_leading_obj = dist_lc_start_to_obj;
-      leading_obj_idx = obj_idx;
-    }
-  }
-
-  return leading_obj_idx;
-}
-
 lanelet::BasicPolygon2d create_polygon(
   const lanelet::ConstLanelets & lanes, const double start_dist, const double end_dist)
 {
@@ -942,7 +811,8 @@ ExtendedPredictedObject transform(
 {
   ExtendedPredictedObject extended_object(object);
 
-  const auto & time_resolution = lane_change_parameters.prediction_time_resolution;
+  const auto & time_resolution =
+    lane_change_parameters.safety.collision_check.prediction_time_resolution;
   const double obj_vel_norm =
     std::hypot(extended_object.initial_twist.linear.x, extended_object.initial_twist.linear.y);
 
@@ -1056,10 +926,10 @@ LanesPolygon create_lanes_polygon(const CommonDataPtr & common_data_ptr)
   lanes_polygon.target =
     utils::lane_change::create_polygon(lanes->target, 0.0, std::numeric_limits<double>::max());
 
-  const auto & lc_param_ptr = common_data_ptr->lc_param_ptr;
+  const auto & params = common_data_ptr->lc_param_ptr->safety;
   const auto expanded_target_lanes = utils::lane_change::generateExpandedLanelets(
-    lanes->target, common_data_ptr->direction, lc_param_ptr->lane_expansion_left_offset,
-    lc_param_ptr->lane_expansion_right_offset);
+    lanes->target, common_data_ptr->direction, params.lane_expansion_left_offset,
+    params.lane_expansion_right_offset);
   lanes_polygon.expanded_target = utils::lane_change::create_polygon(
     expanded_target_lanes, 0.0, std::numeric_limits<double>::max());
 
@@ -1208,7 +1078,7 @@ double get_min_dist_to_current_lanes_obj(
   for (const auto & object : filtered_objects.current_lane) {
     // check if stationary
     const auto obj_v = std::abs(object.initial_twist.linear.x);
-    if (obj_v > common_data_ptr->lc_param_ptr->stop_velocity_threshold) {
+    if (obj_v > common_data_ptr->lc_param_ptr->th_stop_velocity) {
       continue;
     }
 
@@ -1321,7 +1191,7 @@ bool filter_target_lane_objects(
   const auto & current_lanes = common_data_ptr->lanes_ptr->current;
   const auto & vehicle_width = common_data_ptr->bpp_param_ptr->vehicle_info.vehicle_width_m;
   const auto & lanes_polygon = *common_data_ptr->lanes_polygon_ptr;
-  const auto stopped_obj_vel_th = common_data_ptr->lc_param_ptr->stopped_object_velocity_threshold;
+  const auto stopped_obj_vel_th = common_data_ptr->lc_param_ptr->safety.th_stopped_object_velocity;
 
   const auto is_lateral_far = std::invoke([&]() -> bool {
     const auto dist_object_to_current_lanes_center =

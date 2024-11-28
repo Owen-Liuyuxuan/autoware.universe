@@ -144,10 +144,10 @@ bool isParkedObject(
  *
  * @param common_data_ptr Shared pointer to CommonData that holds necessary lanes info, parameters,
  *                        and transient data.
- * @param lane_change_path Cadidate lane change path to apply checks on.
+ * @param lane_change_path Candidate lane change path to apply checks on.
  * @param target_objects Relevant objects to consider for delay LC checks (assumed to only include
  *                       target lane leading static objects).
- * @param object_debug Collision check debug struct to be updated if any of the traget objects
+ * @param object_debug Collision check debug struct to be updated if any of the target objects
  *                     satisfy the conditions.
  * @return bool True if conditions to delay lane change are met
  */
@@ -155,15 +155,6 @@ bool is_delay_lane_change(
   const CommonDataPtr & common_data_ptr, const LaneChangePath & lane_change_path,
   const std::vector<ExtendedPredictedObject> & target_objects,
   CollisionCheckDebugMap & object_debug);
-
-bool passed_parked_objects(
-  const CommonDataPtr & common_data_ptr, const LaneChangePath & lane_change_path,
-  const std::vector<ExtendedPredictedObject> & objects, CollisionCheckDebugMap & object_debug);
-
-std::optional<size_t> getLeadingStaticObjectIdx(
-  const RouteHandler & route_handler, const LaneChangePath & lane_change_path,
-  const std::vector<ExtendedPredictedObject> & objects,
-  const double object_check_min_road_shoulder_width, const double object_shiftable_ratio_threshold);
 
 lanelet::BasicPolygon2d create_polygon(
   const lanelet::ConstLanelets & lanes, const double start_dist, const double end_dist);
