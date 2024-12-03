@@ -1190,6 +1190,7 @@ std::vector<LaneChangePhaseMetrics> NormalLaneChange::get_lane_changing_metrics(
 LaneChangePaths NormalLaneChange::generate_frenet_candidates(
   const std::vector<LaneChangePhaseMetrics> & metrics) const
 {
+  const auto min_lc_vel = common_data_ptr_->lc_param_ptr->trajectory.min_lane_changing_velocity;
   LaneChangePaths candidates;
   universe_utils::StopWatch<std::chrono::microseconds> sw;
   double prepare_segment_us = 0.0;
@@ -1242,16 +1243,15 @@ LaneChangePaths NormalLaneChange::generate_frenet_candidates(
       initial_state.lateral_velocity, initial_state.longitudinal_acceleration,
       initial_state.lateral_acceleration);
     frenet_planner::SamplingParameters sampling_parameters;
-    sampling_parameters.resolution = lane_change_parameters_->prediction_time_resolution;
+    sampling_parameters.resolution =
+      lane_change_parameters_->safety.collision_check.prediction_time_resolution;
     const auto [min_lateral_acc, max_lateral_acc] =
-      lane_change_parameters_->lane_change_lat_acc_map.find(
-        lane_change_parameters_->minimum_lane_changing_velocity);
+      lane_change_parameters_->trajectory.lat_acc_map.find(min_lc_vel);
     const auto duration = autoware::motion_utils::calc_shift_time_from_jerk(
-      std::abs(initial_state.position.d), lane_change_parameters_->lane_changing_lateral_jerk,
+      std::abs(initial_state.position.d), lane_change_parameters_->trajectory.lateral_jerk,
       max_lateral_acc);
-    const auto final_velocity = std::max(
-      lane_change_parameters_->minimum_lane_changing_velocity,
-      metric.velocity + metric.sampled_lon_accel * duration);
+    const auto final_velocity =
+      std::max(min_lc_vel, metric.velocity + metric.sampled_lon_accel * duration);
     const auto lc_length = duration * (metric.velocity + final_velocity) * 0.5;
     const auto target_s = initial_state.position.s + lc_length;
     sampling_parameters.parameters.emplace_back();
@@ -1359,9 +1359,9 @@ bool NormalLaneChange::get_lane_change_paths(LaneChangePaths & candidate_paths) 
       "(NO SAFE PATH) Search time: %2.2fus (%lu candidates)\n", sw.toc(), candidate_paths.size());
   } else {
     candidate_paths.reserve(
-      prepare_phase_metrics.size() * lane_change_parameters_->lateral_acc_sampling_num);
+      prepare_phase_metrics.size() * lane_change_parameters_->trajectory.lat_acc_sampling_num);
 
-    const bool only_tl = getStopTime() >= lane_change_parameters_->stop_time_threshold;
+    const bool only_tl = getStopTime() >= lane_change_parameters_->th_stop_time;
     const auto dist_to_next_regulatory_element =
       utils::lane_change::get_distance_to_next_regulatory_element(
         common_data_ptr_, only_tl, only_tl);
@@ -1371,12 +1371,12 @@ bool NormalLaneChange::get_lane_change_paths(LaneChangePaths & candidate_paths) 
         if (candidate_paths.empty()) return true;
 
         const auto prep_diff = std::abs(candidate_paths.back().info.length.prepare - prep_length);
-        if (prep_diff > lane_change_parameters_->skip_process_lon_diff_th_prepare) return true;
+        if (prep_diff > lane_change_parameters_->trajectory.th_prepare_length_diff) return true;
 
         if (!check_lc) return false;
 
         const auto lc_diff = std::abs(candidate_paths.back().info.length.lane_changing - lc_length);
-        return lc_diff > lane_change_parameters_->skip_process_lon_diff_th_lane_changing;
+        return lc_diff > lane_change_parameters_->trajectory.th_lane_changing_length_diff;
       };
 
     for (const auto & prep_metric : prepare_phase_metrics) {
