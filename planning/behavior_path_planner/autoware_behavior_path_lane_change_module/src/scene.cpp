@@ -1198,6 +1198,8 @@ LaneChangePaths NormalLaneChange::generate_frenet_candidates(
   double gen_us = 0.0;
   double ref_path_us = 0.0;
 
+  const auto & transient_data = common_data_ptr_->transient_data;
+
   for (const auto & metric : metrics) {
     PathWithLaneId prepare_segment;
     try {
@@ -1214,9 +1216,21 @@ LaneChangePaths NormalLaneChange::generate_frenet_candidates(
     const auto lc_start_pose = prepare_segment.points.back().point.pose;
     sw.tic("ref_path");  // TODO(Maxime): this is the most time consuming step. We can probably only
                          // do it once
+
+    const auto dist_to_end_from_lc_start =
+      calculation::calc_dist_from_pose_to_terminal_end(
+        common_data_ptr_, get_target_lanes(), lc_start_pose) -
+      common_data_ptr_->lc_param_ptr->lane_change_finish_judge_buffer;
+    const auto max_lc_len = transient_data.lane_changing_length.max;
+
     const auto target_lane_reference_path = utils::lane_change::get_reference_path_from_target_Lane(
-      common_data_ptr_, lc_start_pose, metric.length, 0.5);
+      common_data_ptr_, lc_start_pose, std::min(dist_to_end_from_lc_start, max_lc_len), 0.5);
     ref_path_us += sw.toc("ref_path");
+
+    if (target_lane_reference_path.points.empty()) {
+      continue;
+    }
+
     sw.tic("ref_spline");
     std::vector<double> xs;
     std::vector<double> ys;
