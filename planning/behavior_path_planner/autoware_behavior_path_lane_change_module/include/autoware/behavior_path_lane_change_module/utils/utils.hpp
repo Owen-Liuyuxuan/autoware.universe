@@ -90,7 +90,8 @@ bool path_footprint_exceeds_target_lane_bound(
   const double margin = 0.1);
 
 LaneChangePaths get_frenet_paths(
-  const PathWithLaneId & target_lane, const PathWithLaneId & prepare_segment,
+  const CommonDataPtr & common_data_ptr, const PathWithLaneId & target_lane,
+  const PathWithLaneId & prepare_segment,
   const sampler_common::transform::Spline2D & reference_path,
   const frenet_planner::FrenetState & initial_state,
   const frenet_planner::SamplingParameters & sampling_parameters,

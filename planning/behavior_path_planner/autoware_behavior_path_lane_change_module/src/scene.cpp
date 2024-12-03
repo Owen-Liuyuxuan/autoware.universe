@@ -14,6 +14,13 @@
 
 #include "autoware/behavior_path_lane_change_module/scene.hpp"
 
+#include <boost/geometry/algorithms/buffer.hpp>
+
+#include <fstream>
+#include <iostream>
+// for the geometry types
+#include <autoware/universe_utils/geometry/boost_geometry.hpp>
+// for the svg mapper
 #include "autoware/behavior_path_lane_change_module/utils/calculation.hpp"
 #include "autoware/behavior_path_lane_change_module/utils/path.hpp"
 #include "autoware/behavior_path_lane_change_module/utils/utils.hpp"
@@ -37,6 +44,10 @@
 #include <range/v3/algorithm/any_of.hpp>
 #include <range/v3/algorithm/for_each.hpp>
 #include <range/v3/algorithm/sort.hpp>
+#include <range/v3/view.hpp>
+
+#include <boost/geometry/io/svg/svg_mapper.hpp>
+#include <boost/geometry/io/svg/write.hpp>
 
 #include <lanelet2_core/geometry/Point.h>
 #include <lanelet2_core/geometry/Polygon.h>
@@ -1240,8 +1251,10 @@ LaneChangePaths NormalLaneChange::generate_frenet_candidates(
       xs.push_back(p.point.pose.position.x);
       ys.push_back(p.point.pose.position.y);
     }
+
     sampler_common::transform::Spline2D reference_spline(xs, ys);
     ref_spline_us += sw.toc("ref_spline");
+
     frenet_planner::FrenetState initial_state;
     const auto initial_yaw = tf2::getYaw(lc_start_pose.orientation);
     initial_state.position =
@@ -1259,13 +1272,17 @@ LaneChangePaths NormalLaneChange::generate_frenet_candidates(
     frenet_planner::SamplingParameters sampling_parameters;
     sampling_parameters.resolution =
       lane_change_parameters_->safety.collision_check.prediction_time_resolution;
+
     const auto [min_lateral_acc, max_lateral_acc] =
-      lane_change_parameters_->trajectory.lat_acc_map.find(min_lc_vel);
+      lane_change_parameters_->trajectory.lat_acc_map.find(std::max(min_lc_vel, metric.velocity));
+
     const auto duration = autoware::motion_utils::calc_shift_time_from_jerk(
       std::abs(initial_state.position.d), lane_change_parameters_->trajectory.lateral_jerk,
       max_lateral_acc);
+
     const auto final_velocity =
       std::max(min_lc_vel, metric.velocity + metric.sampled_lon_accel * duration);
+
     const auto lc_length = duration * (metric.velocity + final_velocity) * 0.5;
     const auto target_s = initial_state.position.s + lc_length;
     sampling_parameters.parameters.emplace_back();
@@ -1287,8 +1304,8 @@ LaneChangePaths NormalLaneChange::generate_frenet_candidates(
     std::cout << " Target : " << sampling_parameters.parameters.back() << "\n";
     sw.tic("gen");
     auto frenet_candidates = utils::lane_change::get_frenet_paths(
-      target_lane_reference_path, prepare_segment, reference_spline, initial_state,
-      sampling_parameters, metric);
+      common_data_ptr_, target_lane_reference_path, prepare_segment, reference_spline,
+      initial_state, sampling_parameters, metric);
     gen_us += sw.toc("gen");
     std::move(frenet_candidates.begin(), frenet_candidates.end(), std::back_inserter(candidates));
   }
@@ -1313,6 +1330,106 @@ LaneChangePaths NormalLaneChange::generate_frenet_candidates(
       }
       return (sum_k1 / count1) < (sum_k2 / count2);
     });
+  for (const auto & candidate : candidates) {
+    using universe_utils::Point2d;
+    [[maybe_unused]] const auto perpendicular_vector = [&](const Point2d & p1, const Point2d & p2) {
+      const auto direction = common_data_ptr_->direction;
+      const auto left_side = direction == Direction::LEFT;
+      const auto distance = (0.5 * common_data_ptr_->bpp_param_ptr->vehicle_width + 0.1);
+      const auto offset = (left_side ? 1.0 : -1.0) * distance;  // invert direction
+      // Calculate the perpendicular vector
+      double dx = p2.x() - p1.x();
+      double dy = p2.y() - p1.y();
+      double length = std::sqrt(dx * dx + dy * dy);
+
+      // Normalize and find the perpendicular direction
+      double nx = -dy / length;
+      double ny = dx / length;
+
+      return Point2d(p1.x() + nx * offset, p1.y() + ny * offset);
+    };
+
+    const auto & path_points = candidate.shifted_path.path.points;
+
+    universe_utils::LineString2d line_string2;
+    ranges::for_each(path_points, [&line_string2](const auto & point) {
+      boost::geometry::append(
+        line_string2,
+        universe_utils::Point2d(point.point.pose.position.x, point.point.pose.position.y));
+    });
+
+    universe_utils::LineString2d line_string;
+    if (path_points.size() > 1) {
+      line_string.reserve(path_points.size());
+
+      // doesnt makes sense to append first point because we want the lane changing part
+      //  still need to fix
+      //  {
+      //    const auto p1_i = path_points[0].point.pose.position;
+      //    Point2d p1_init{p1_i.x, p1_i.y};
+
+      //   const auto p2_i = path_points[1].point.pose.position;
+      //   Point2d p2_init{p2_i.x, p2_i.y};
+      //   boost::geometry::append(line_string, perpendicular_vector(p1_init, p2_init));
+      // }
+
+      const auto segment = path_points | ranges::views::sliding(2);
+      ranges::for_each(segment | ranges::views::drop(1), [&](const auto & segment) {
+        const auto & p1_s = segment[0].point.pose.position;
+        const auto & p2_s = segment[1].point.pose.position;
+
+        Point2d p1{p1_s.x, p1_s.y};
+        Point2d p2{p2_s.x, p2_s.y};
+
+        boost::geometry::append(line_string, perpendicular_vector(p2, p1));
+      });
+    }
+    const auto buffer_distance = 0.5 * common_data_ptr_->bpp_param_ptr->vehicle_width + 0.1;
+    universe_utils::MultiPolygon2d path_poly;
+    namespace strategy = boost::geometry::strategy::buffer;
+    boost::geometry::buffer(
+      line_string, path_poly, strategy::distance_symmetric<double>(buffer_distance),
+      strategy::side_straight(), strategy::join_miter(), strategy::end_flat(),
+      strategy::point_square());
+
+    [[maybe_unused]] const auto target_neighbor_ls = std::invoke([&]() {
+      universe_utils::LineString2d line_string;
+      const auto & get_bound = [&](const lanelet::ConstLanelet & lane) {
+        const auto direction = common_data_ptr_->direction;
+        if (direction == Direction::LEFT) {
+          return lane.leftBound2d();
+        }
+        return lane.rightBound2d();
+      };
+
+      for (const auto & lane : common_data_ptr_->lanes_ptr->target_neighbor) {
+        ranges::for_each(get_bound(lane), [&line_string](const auto & point) {
+          boost::geometry::append(line_string, universe_utils::Point2d(point.x(), point.y()));
+        });
+      }
+      return line_string;
+    });
+    if (
+      // line_string.empty() || target_neighbor_ls.empty() ||
+      boost::geometry::disjoint(line_string, target_neighbor_ls)) {
+      continue;
+    }
+
+    std::ofstream svg("/home/zulfaqar/Pictures/image.svg");  // /!\ CHANGE PATH
+    boost::geometry::svg_mapper<Point2d> mapper(svg, 1800, 1800);
+    const auto & target_neigh = common_data_ptr_->lanes_polygon_ptr->target_neighbor;
+    mapper.add(target_neigh);
+    mapper.add(path_poly);
+    // mapper.add(target_neighbor_ls);
+    mapper.add(line_string);
+    mapper.add(line_string2);
+    mapper.map(path_poly, "fill-opacity:0.5;fill:none;stroke:blue;stroke-width:2");
+    mapper.map(line_string, "fill-opacity:0.5;fill:none;stroke:green;stroke-width:2");
+    mapper.map(line_string2, "fill-opacity:1.0;fill:none;stroke:black;stroke-width:1");
+    // mapper.map(target_neighbor_ls, "fill-opacity:0.3;fill:red;stroke:red;stroke-width:2");
+    mapper.map(target_neigh, "fill-opacity:0.7;fill:pink;stroke:red;stroke-width:2");
+    break;
+  }
   std::printf(
     "\tGenerated %lu candidates | prepare_segment %2.2fus, reference spline %2.2fus, frenet "
     "generation %2.2fus, reference path %2.2fus\n",

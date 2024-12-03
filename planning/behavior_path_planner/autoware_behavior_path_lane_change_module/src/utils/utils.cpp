@@ -25,11 +25,15 @@
 #include "autoware/object_recognition_utils/predicted_path_utils.hpp"
 #include "autoware/universe_utils/math/unit_conversion.hpp"
 
+#include <fstream>
+#include <iostream>
+// for the geometry types
+#include <autoware/universe_utils/geometry/boost_geometry.hpp>
+// for the svg mapper
 #include <autoware/behavior_path_planner_common/utils/path_safety_checker/objects_filtering.hpp>
 #include <autoware/motion_utils/trajectory/interpolation.hpp>
 #include <autoware/motion_utils/trajectory/path_with_lane_id.hpp>
 #include <autoware/motion_utils/trajectory/trajectory.hpp>
-#include <autoware/universe_utils/geometry/boost_geometry.hpp>
 #include <autoware/universe_utils/geometry/boost_polygon_utils.hpp>
 #include <autoware/universe_utils/geometry/geometry.hpp>
 #include <autoware/universe_utils/system/stop_watch.hpp>
@@ -37,10 +41,14 @@
 #include <autoware_lanelet2_extension/utility/query.hpp>
 #include <autoware_lanelet2_extension/utility/utilities.hpp>
 #include <autoware_vehicle_info_utils/vehicle_info.hpp>
-#include <range/v3/algorithm/any_of.hpp>
+#include <range/v3/algorithm.hpp>
+#include <range/v3/view.hpp>
 #include <rclcpp/rclcpp.hpp>
 
+#include <boost/geometry/algorithms/buffer.hpp>
 #include <boost/geometry/algorithms/detail/disjoint/interface.hpp>
+#include <boost/geometry/io/svg/svg_mapper.hpp>
+#include <boost/geometry/io/svg/write.hpp>
 
 #include <lanelet2_core/LaneletMap.h>
 #include <lanelet2_core/geometry/LineString.h>
@@ -61,6 +69,7 @@ namespace autoware::behavior_path_planner::utils::lane_change
 {
 using autoware::route_handler::RouteHandler;
 using autoware::universe_utils::LineString2d;
+using autoware::universe_utils::Point2d;
 using autoware::universe_utils::Polygon2d;
 using autoware_perception_msgs::msg::ObjectClassification;
 using autoware_perception_msgs::msg::PredictedObjects;
@@ -186,7 +195,8 @@ bool path_footprint_exceeds_target_lane_bound(
 }
 
 LaneChangePaths get_frenet_paths(
-  const PathWithLaneId & target_lane, const PathWithLaneId & prepare_segment,
+  const CommonDataPtr & common_data_ptr, const PathWithLaneId & target_lane,
+  const PathWithLaneId & prepare_segment,
   const sampler_common::transform::Spline2D & reference_path,
   const frenet_planner::FrenetState & initial_state,
   const frenet_planner::SamplingParameters & sampling_parameters,
@@ -195,6 +205,43 @@ LaneChangePaths get_frenet_paths(
   LaneChangePaths candidate_paths;
   const auto candidates =
     frenet_planner::generateTrajectories(reference_path, initial_state, sampling_parameters);
+
+  [[maybe_unused]] const auto target_neighbor_ls = std::invoke([&]() {
+    universe_utils::LineString2d line_string;
+    const auto & get_bound = [&](const lanelet::ConstLanelet & lane) {
+      const auto direction = common_data_ptr->direction;
+      if (direction == Direction::LEFT) {
+        return lane.leftBound2d();
+      }
+      return lane.rightBound2d();
+    };
+
+    for (const auto & lane : common_data_ptr->lanes_ptr->current) {
+      ranges::for_each(get_bound(lane), [&line_string](const auto & point) {
+        boost::geometry::append(line_string, universe_utils::Point2d(point.x(), point.y()));
+      });
+    }
+    std::cerr << "siiiiiiizzzzzzzzzz " << line_string.size() << '\n';
+    return line_string;
+  });
+
+  [[maybe_unused]] const auto perpendicular_vector = [&](const Point2d & p1, const Point2d & p2) {
+    const auto direction = common_data_ptr->direction;
+    const auto left_side = direction == Direction::LEFT;
+    const auto distance = (0.5 * common_data_ptr->bpp_param_ptr->vehicle_width + 0.1);
+    const auto offset = (left_side ? 1.0 : -1.0) * distance;  // invert direction
+    // Calculate the perpendicular vector
+    double dx = p2.x() - p1.x();
+    double dy = p2.y() - p1.y();
+    double length = std::sqrt(dx * dx + dy * dy);
+
+    // Normalize and find the perpendicular direction
+    double nx = -dy / length;
+    double ny = dx / length;
+
+    return Point2d(p1.x() + nx * offset, p1.y() + ny * offset);
+  };
+
   for (const auto & candidate : candidates) {
     ShiftedPath shifted_path;
     PathPointWithLaneId pp;
@@ -222,6 +269,7 @@ LaneChangePaths get_frenet_paths(
     if (shifted_path.path.points.empty()) {
       continue;
     }
+
     const auto nearest_segment_idx = autoware::motion_utils::findNearestSegmentIndex(
       target_lane.points, shifted_path.path.points.back().point.pose.position);
     for (auto i = nearest_segment_idx + 2; i < target_lane.points.size(); ++i) {
@@ -253,6 +301,72 @@ LaneChangePaths get_frenet_paths(
           autoware::universe_utils::rad2deg(yaw_diff2));
         continue;
       }
+    }
+
+    const auto & path_points = shifted_path.path.points;
+
+    universe_utils::LineString2d line_string2;
+    ranges::for_each(path_points, [&line_string2](const auto & point) {
+      boost::geometry::append(
+        line_string2,
+        universe_utils::Point2d(point.point.pose.position.x, point.point.pose.position.y));
+    });
+
+    universe_utils::LineString2d line_string;
+    if (path_points.size() > 1) {
+      line_string.reserve(path_points.size());
+
+      // doesnt makes sense to append first point because we want the lane changing part
+      //  still need to fix
+      //  {
+      //    const auto p1_i = path_points[0].point.pose.position;
+      //    Point2d p1_init{p1_i.x, p1_i.y};
+
+      //   const auto p2_i = path_points[1].point.pose.position;
+      //   Point2d p2_init{p2_i.x, p2_i.y};
+      //   boost::geometry::append(line_string, perpendicular_vector(p1_init, p2_init));
+      // }
+
+      const auto segment = path_points | ranges::views::sliding(2);
+      ranges::for_each(segment | ranges::views::drop(1), [&](const auto & segment) {
+        const auto & p1_s = segment[0].point.pose.position;
+        const auto & p2_s = segment[1].point.pose.position;
+
+        Point2d p1{p1_s.x, p1_s.y};
+        Point2d p2{p2_s.x, p2_s.y};
+
+        boost::geometry::append(line_string, perpendicular_vector(p2, p1));
+      });
+    }
+    const auto buffer_distance = 0.5 * common_data_ptr->bpp_param_ptr->vehicle_width + 0.1;
+    universe_utils::MultiPolygon2d path_poly;
+    namespace strategy = boost::geometry::strategy::buffer;
+    boost::geometry::buffer(
+      line_string, path_poly, strategy::distance_symmetric<double>(buffer_distance),
+      strategy::side_straight(), strategy::join_miter(), strategy::end_flat(),
+      strategy::point_square());
+
+    [[maybe_unused]] const auto target_neighbor_ls = std::invoke([&]() {
+      universe_utils::LineString2d line_string;
+      const auto & get_bound = [&](const lanelet::ConstLanelet & lane) {
+        const auto direction = common_data_ptr->direction;
+        if (direction == Direction::LEFT) {
+          return lane.leftBound2d();
+        }
+        return lane.rightBound2d();
+      };
+
+      for (const auto & lane : common_data_ptr->lanes_ptr->target_neighbor) {
+        ranges::for_each(get_bound(lane), [&line_string](const auto & point) {
+          boost::geometry::append(line_string, universe_utils::Point2d(point.x(), point.y()));
+        });
+      }
+      return line_string;
+    });
+    if (
+      // line_string.empty() || target_neighbor_ls.empty() ||
+      boost::geometry::disjoint(line_string, target_neighbor_ls)) {
+      continue;
     }
 
     LaneChangeInfo info;
