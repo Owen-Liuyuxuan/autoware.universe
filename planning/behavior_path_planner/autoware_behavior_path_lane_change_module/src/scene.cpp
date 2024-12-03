@@ -1274,16 +1274,9 @@ LaneChangePaths NormalLaneChange::generate_frenet_candidates(
     sw.tic("gen");
     auto frenet_candidates = utils::lane_change::get_frenet_paths(
       target_lane_reference_path, prepare_segment, reference_spline, initial_state,
-      sampling_parameters);
+      sampling_parameters, metric);
     gen_us += sw.toc("gen");
-    for (auto & candidate : frenet_candidates) {
-      candidate.info.lane_changing_start = prepare_segment.points.back().point.pose;
-      candidate.info.duration.prepare = metric.duration;
-      candidate.info.longitudinal_acceleration.prepare = metric.sampled_lon_accel;
-      candidate.info.velocity.prepare = metric.velocity;
-      candidate.info.length.prepare = metric.length;
-      candidates.push_back(candidate);
-    }
+    std::move(frenet_candidates.begin(), frenet_candidates.end(), std::back_inserter(candidates));
   }
   // sort by average curvature along the lane changing portion of the path
   std::sort(

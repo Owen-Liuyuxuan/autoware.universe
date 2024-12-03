@@ -189,7 +189,8 @@ LaneChangePaths get_frenet_paths(
   const PathWithLaneId & target_lane, const PathWithLaneId & prepare_segment,
   const sampler_common::transform::Spline2D & reference_path,
   const frenet_planner::FrenetState & initial_state,
-  const frenet_planner::SamplingParameters & sampling_parameters)
+  const frenet_planner::SamplingParameters & sampling_parameters,
+  const LaneChangePhaseMetrics & prepare_metric)
 {
   LaneChangePaths candidate_paths;
   const auto candidates =
@@ -253,25 +254,44 @@ LaneChangePaths get_frenet_paths(
         continue;
       }
     }
-    LaneChangePath candidate_path;
-    candidate_path.path = utils::combinePath(prepare_segment, shifted_path.path);
-    candidate_path.shifted_path = shifted_path;
-    candidate_path.info.duration.lane_changing = candidate.sampling_parameter.target_duration;
-    candidate_path.info.lane_changing_end = candidate.poses.back();
-    candidate_path.info.terminal_lane_changing_velocity = candidate.longitudinal_velocities.back();
-    candidate_path.info.velocity.lane_changing = initial_state.longitudinal_velocity;
-    candidate_path.info.length.lane_changing = candidate.lengths.back();
-    candidate_path.info.longitudinal_acceleration.lane_changing =
-      candidate.longitudinal_accelerations.front();
-    candidate_path.info.lateral_acceleration = candidate.lateral_accelerations.front();
-    candidate_path.info.shift_line.start_shift_length = 0.0;
-    candidate_path.info.shift_line.end_shift_length = initial_state.position.d;
-    candidate_path.info.shift_line.start = candidate.poses.front();
+
+    LaneChangeInfo info;
+    info.longitudinal_acceleration = {
+      prepare_metric.actual_lon_accel, candidate.longitudinal_accelerations.front()};
+    info.velocity = {prepare_metric.velocity, initial_state.longitudinal_velocity};
+    info.duration = {prepare_metric.duration, candidate.sampling_parameter.target_duration};
+    info.length = {prepare_metric.length, candidate.lengths.back()};
+
+    std::printf(
+      "p: l=%2.2f, t=%2.2f, v=%2.2f, a=%2.2f | lc: l=%2.2f, t=%2.2f, v=%2.2f, a=%2.2f",
+      info.length.prepare, info.duration.prepare, info.velocity.prepare,
+      info.longitudinal_acceleration.prepare, info.length.lane_changing,
+      info.duration.lane_changing, info.velocity.lane_changing,
+      info.longitudinal_acceleration.lane_changing);
+
+    info.lane_changing_start = prepare_segment.points.back().point.pose;
+    info.lane_changing_end = candidate.poses.back();
+
+    ShiftLine sl;
+
+    sl.start = candidate.poses.front();
     // prepare_segment.points.back() .point.pose;  // TODO(Maxime): should it be 1st point of
     // candidate ?
-    candidate_path.info.shift_line.end = candidate.poses.back();
-    candidate_path.info.shift_line.start_idx = 0UL;
-    candidate_path.info.shift_line.end_idx = shifted_path.shift_length.size() - 1;
+    sl.end = candidate.poses.back();
+    sl.start_shift_length = 0.0;
+    sl.end_shift_length = initial_state.position.d;
+    sl.start_idx = 0UL;
+    sl.end_idx = shifted_path.shift_length.size() - 1;
+
+    info.shift_line = sl;
+
+    info.terminal_lane_changing_velocity = candidate.longitudinal_velocities.back();
+    info.lateral_acceleration = candidate.lateral_accelerations.front();
+
+    LaneChangePath candidate_path;
+    candidate_path.path = utils::combinePath(prepare_segment, shifted_path.path);
+    candidate_path.info = info;
+    candidate_path.shifted_path = shifted_path;
     candidate_paths.push_back(candidate_path);
   }
   return candidate_paths;
@@ -715,12 +735,14 @@ std::vector<PoseWithVelocityStamped> convert_to_predicted_path(
   std::vector<PoseWithVelocityStamped> predicted_path;
 
   // prepare segment
+  std::printf("p: ");
   for (double t = 0.0; t < prepare_time; t += resolution) {
     const auto velocity =
       std::clamp(initial_velocity + prepare_acc * t, 0.0, lane_change_path.info.velocity.prepare);
     const auto length = initial_velocity * t + 0.5 * prepare_acc * t * t;
     const auto pose = autoware::motion_utils::calcInterpolatedPose(
       path.points, vehicle_pose_frenet.length + length);
+    std::printf("%2.2f ", vehicle_pose_frenet.length + length);
     predicted_path.emplace_back(t, pose, velocity);
   }
 
@@ -729,6 +751,8 @@ std::vector<PoseWithVelocityStamped> convert_to_predicted_path(
     initial_velocity + prepare_acc * prepare_time, 0.0, lane_change_path.info.velocity.prepare);
   const auto offset =
     initial_velocity * prepare_time + 0.5 * prepare_acc * prepare_time * prepare_time;
+
+  std::printf("lc: ");
   for (double t = prepare_time; t < duration; t += resolution) {
     const auto delta_t = t - prepare_time;
     const auto velocity = std::clamp(
@@ -738,8 +762,11 @@ std::vector<PoseWithVelocityStamped> convert_to_predicted_path(
                         0.5 * lane_changing_acceleration * delta_t * delta_t + offset;
     const auto pose = autoware::motion_utils::calcInterpolatedPose(
       path.points, vehicle_pose_frenet.length + length);
+
+    std::printf("%2.2f ", vehicle_pose_frenet.length + length);
     predicted_path.emplace_back(t, pose, velocity);
   }
+  std::printf("\n");
 
   return predicted_path;
 }

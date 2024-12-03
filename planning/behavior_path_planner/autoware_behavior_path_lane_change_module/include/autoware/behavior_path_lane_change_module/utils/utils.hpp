@@ -93,7 +93,8 @@ LaneChangePaths get_frenet_paths(
   const PathWithLaneId & target_lane, const PathWithLaneId & prepare_segment,
   const sampler_common::transform::Spline2D & reference_path,
   const frenet_planner::FrenetState & initial_state,
-  const frenet_planner::SamplingParameters & sampling_parameters);
+  const frenet_planner::SamplingParameters & sampling_parameters,
+  const LaneChangePhaseMetrics & prepare_metrics);
 
 std::optional<LaneChangePath> construct_candidate_path(
   const LaneChangeInfo & lane_change_info, const PathWithLaneId & prepare_segment,
