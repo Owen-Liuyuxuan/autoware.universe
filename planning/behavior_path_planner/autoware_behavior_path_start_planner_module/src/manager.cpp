@@ -84,6 +84,8 @@ void StartPlannerModuleManager::init(rclcpp::Node * node)
       node->declare_parameter<double>(ns + "lane_departure_check_expansion_margin");
     p.parallel_parking_parameters.pull_out_max_steer_angle =
       node->declare_parameter<double>(ns + "pull_out_max_steer_angle");  // 15deg
+    p.parallel_parking_parameters.pull_out_use_clothoid =
+      node->declare_parameter<bool>(ns + "pull_out_use_clothoid");
     p.parallel_parking_parameters.center_line_path_interval =
       p.center_line_path_interval;  // for geometric parallel parking
     // search start pose backward
@@ -426,6 +428,9 @@ void StartPlannerModuleManager::updateModuleParams(
     updateParam<double>(
       parameters, ns + "pull_out_max_steer_angle",
       p->parallel_parking_parameters.pull_out_max_steer_angle);
+    updateParam<bool>(
+      parameters, ns + "pull_out_use_clothoid",
+      p->parallel_parking_parameters.pull_out_use_clothoid);
     updateParam<bool>(parameters, ns + "enable_back", p->enable_back);
     updateParam<double>(parameters, ns + "backward_velocity", p->backward_velocity);
     updateParam<double>(
