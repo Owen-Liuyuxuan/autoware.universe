@@ -29,14 +29,14 @@ using autoware::behavior_path_planner::TurnSignalInfo;
 using tier4_planning_msgs::msg::PathWithLaneId;
 struct Path
 {
-  PathWithLaneId path{};
-  ShiftedPath shifted_path{};
-  Info info{};
+  PathWithLaneId path;
+  ShiftedPath shifted_path;
+  Info info;
 };
 
 struct Status
 {
-  Path lane_change_path{};
+  Path lane_change_path;
   bool is_safe{false};
   bool is_valid_path{false};
   double start_distance{0.0};

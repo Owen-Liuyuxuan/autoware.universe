@@ -276,7 +276,7 @@ protected:
     }
   }
 
-  LaneChangeStatus status_{};
+  LaneChangeStatus status_;
   PathShifter path_shifter_{};
 
   LaneChangeStates current_lane_change_state_{};
