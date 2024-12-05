@@ -90,7 +90,7 @@ bool path_footprint_exceeds_target_lane_bound(
   const double margin = 0.1);
 
 std::vector<frenet_planner::Trajectory> generate_trajectories(
-  const sampler_common::transform::Spline2D & reference_path,
+  const CommonDataPtr & common_data_ptr, const sampler_common::transform::Spline2D & reference_path,
   const frenet_planner::FrenetState & initial_state,
   const frenet_planner::SamplingParameters & sampling_parameters);
 

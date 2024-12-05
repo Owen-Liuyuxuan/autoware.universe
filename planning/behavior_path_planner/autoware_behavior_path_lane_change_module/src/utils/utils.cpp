@@ -196,7 +196,7 @@ bool path_footprint_exceeds_target_lane_bound(
 }
 
 std::vector<frenet_planner::Trajectory> generate_trajectories(
-  const sampler_common::transform::Spline2D & reference_path,
+  const CommonDataPtr & common_data_ptr, const sampler_common::transform::Spline2D & reference_path,
   const frenet_planner::FrenetState & initial_state,
   const frenet_planner::SamplingParameters & sampling_parameters)
 {
@@ -218,39 +218,30 @@ std::vector<frenet_planner::Trajectory> generate_trajectories(
     return avg_curvature(p1.curvatures) < avg_curvature(p2.curvatures);
   });
 
-  return candidates;
-}
-
-LaneChangePaths get_frenet_paths(
-  const CommonDataPtr & common_data_ptr, const PathWithLaneId & target_lane,
-  const PathWithLaneId & prepare_segment,
-  const sampler_common::transform::Spline2D & reference_path,
-  const frenet_planner::FrenetState & initial_state,
-  const frenet_planner::SamplingParameters & sampling_parameters,
-  const LaneChangePhaseMetrics & prepare_metric)
-{
-  auto candidates = generate_trajectories(reference_path, initial_state, sampling_parameters);
-
-  [[maybe_unused]] const auto target_neighbor_ls = std::invoke([&]() {
+  const auto lane_boundary = std::invoke([&]() {
     universe_utils::LineString2d line_string;
     const auto & get_bound = [&](const lanelet::ConstLanelet & lane) {
       const auto direction = common_data_ptr->direction;
-      if (direction == Direction::LEFT) {
-        return lane.leftBound2d();
-      }
-      return lane.rightBound2d();
+      return (direction == Direction::LEFT) ? lane.leftBound2d() : lane.rightBound2d();
     };
 
-    for (const auto & lane : common_data_ptr->lanes_ptr->current) {
+    const auto & lanes = common_data_ptr->lanes_ptr->current;
+
+    const auto reserve_size = ranges::accumulate(
+      lanes, 0UL,
+      [&](auto sum, const lanelet::ConstLanelet & lane) { return sum + get_bound(lane).size(); });
+    line_string.reserve(reserve_size);
+    for (const auto & lane : lanes) {
+      const auto & bound =
+        (common_data_ptr->direction == Direction::LEFT) ? lane.leftBound2d() : lane.rightBound2d();
       ranges::for_each(get_bound(lane), [&line_string](const auto & point) {
         boost::geometry::append(line_string, universe_utils::Point2d(point.x(), point.y()));
       });
     }
-    std::cerr << "siiiiiiizzzzzzzzzz " << line_string.size() << '\n';
     return line_string;
   });
 
-  [[maybe_unused]] const auto perpendicular_vector = [&](const Point2d & p1, const Point2d & p2) {
+  const auto shift_point = [&](const Point2d & p1, const Point2d & p2) {
     const auto direction = common_data_ptr->direction;
     const auto left_side = direction == Direction::LEFT;
     const auto distance = (0.5 * common_data_ptr->bpp_param_ptr->vehicle_width + 0.1);
@@ -266,6 +257,56 @@ LaneChangePaths get_frenet_paths(
 
     return Point2d(p1.x() + nx * offset, p1.y() + ny * offset);
   };
+
+  decltype(candidates) frenet_candidate;
+
+  for (const auto & candidate : candidates) {
+    universe_utils::LineString2d path_ls;
+    if (candidate.poses.size() > 2) {
+      path_ls.reserve(candidate.poses.size());
+
+      const auto segment = candidate.poses | ranges::views::sliding(2);
+      ranges::for_each(segment | ranges::views::drop(1), [&](const auto & segment) {
+        const auto & p1 = segment[0].position;
+        const auto & p2 = segment[1].position;
+
+        boost::geometry::append(path_ls, shift_point({p1.x, p1.y}, {p2.x, p2.y}));
+      });
+    }
+    std::cout << path_ls.size() << " " << lane_boundary.size() << '\n';
+
+    if (boost::geometry::disjoint(path_ls, lane_boundary)) {
+      continue;
+    }
+
+    if (frenet_candidate.empty()) {
+      std::ofstream svg("/home/zulfaqar/Pictures/image2.svg");  // /!\ CHANGE PATH
+      boost::geometry::svg_mapper<Point2d> mapper(svg, 1800, 1800);
+      const auto & target_neigh = common_data_ptr->lanes_polygon_ptr->target_neighbor;
+      mapper.add(target_neigh);
+      mapper.add(path_ls);
+      mapper.add(lane_boundary);
+      mapper.map(path_ls, "fill-opacity:0.5;fill:none;stroke:green;stroke-width:2");
+      mapper.map(lane_boundary, "fill-opacity:1.0;fill:none;stroke:black;stroke-width:1");
+      mapper.map(target_neigh, "fill-opacity:0.7;fill:pink;stroke:red;stroke-width:2");
+    }
+
+    frenet_candidate.push_back(candidate);
+  }
+
+  return frenet_candidate;
+}
+
+LaneChangePaths get_frenet_paths(
+  const CommonDataPtr & common_data_ptr, const PathWithLaneId & target_lane,
+  const PathWithLaneId & prepare_segment,
+  const sampler_common::transform::Spline2D & reference_path,
+  const frenet_planner::FrenetState & initial_state,
+  const frenet_planner::SamplingParameters & sampling_parameters,
+  const LaneChangePhaseMetrics & prepare_metric)
+{
+  auto candidates =
+    generate_trajectories(common_data_ptr, reference_path, initial_state, sampling_parameters);
 
   LaneChangePaths candidate_paths;
   for (const auto & candidate : candidates) {
@@ -327,72 +368,6 @@ LaneChangePaths get_frenet_paths(
           autoware::universe_utils::rad2deg(yaw_diff2));
         continue;
       }
-    }
-
-    const auto & path_points = shifted_path.path.points;
-
-    universe_utils::LineString2d line_string2;
-    ranges::for_each(path_points, [&line_string2](const auto & point) {
-      boost::geometry::append(
-        line_string2,
-        universe_utils::Point2d(point.point.pose.position.x, point.point.pose.position.y));
-    });
-
-    universe_utils::LineString2d line_string;
-    if (path_points.size() > 1) {
-      line_string.reserve(path_points.size());
-
-      // doesnt makes sense to append first point because we want the lane changing part
-      //  still need to fix
-      //  {
-      //    const auto p1_i = path_points[0].point.pose.position;
-      //    Point2d p1_init{p1_i.x, p1_i.y};
-
-      //   const auto p2_i = path_points[1].point.pose.position;
-      //   Point2d p2_init{p2_i.x, p2_i.y};
-      //   boost::geometry::append(line_string, perpendicular_vector(p1_init, p2_init));
-      // }
-
-      const auto segment = path_points | ranges::views::sliding(2);
-      ranges::for_each(segment | ranges::views::drop(1), [&](const auto & segment) {
-        const auto & p1_s = segment[0].point.pose.position;
-        const auto & p2_s = segment[1].point.pose.position;
-
-        Point2d p1{p1_s.x, p1_s.y};
-        Point2d p2{p2_s.x, p2_s.y};
-
-        boost::geometry::append(line_string, perpendicular_vector(p2, p1));
-      });
-    }
-    const auto buffer_distance = 0.5 * common_data_ptr->bpp_param_ptr->vehicle_width + 0.1;
-    universe_utils::MultiPolygon2d path_poly;
-    namespace strategy = boost::geometry::strategy::buffer;
-    boost::geometry::buffer(
-      line_string, path_poly, strategy::distance_symmetric<double>(buffer_distance),
-      strategy::side_straight(), strategy::join_miter(), strategy::end_flat(),
-      strategy::point_square());
-
-    [[maybe_unused]] const auto target_neighbor_ls = std::invoke([&]() {
-      universe_utils::LineString2d line_string;
-      const auto & get_bound = [&](const lanelet::ConstLanelet & lane) {
-        const auto direction = common_data_ptr->direction;
-        if (direction == Direction::LEFT) {
-          return lane.leftBound2d();
-        }
-        return lane.rightBound2d();
-      };
-
-      for (const auto & lane : common_data_ptr->lanes_ptr->target_neighbor) {
-        ranges::for_each(get_bound(lane), [&line_string](const auto & point) {
-          boost::geometry::append(line_string, universe_utils::Point2d(point.x(), point.y()));
-        });
-      }
-      return line_string;
-    });
-    if (
-      // line_string.empty() || target_neighbor_ls.empty() ||
-      boost::geometry::disjoint(line_string, target_neighbor_ls)) {
-      continue;
     }
 
     LaneChangeInfo info;
