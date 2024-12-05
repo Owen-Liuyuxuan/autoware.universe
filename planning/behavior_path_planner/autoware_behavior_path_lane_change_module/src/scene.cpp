@@ -1310,26 +1310,6 @@ LaneChangePaths NormalLaneChange::generate_frenet_candidates(
     std::move(frenet_candidates.begin(), frenet_candidates.end(), std::back_inserter(candidates));
   }
   // sort by average curvature along the lane changing portion of the path
-  std::sort(
-    candidates.begin(), candidates.end(), [](const LaneChangePath & p1, const LaneChangePath & p2) {
-      float sum_k1 = 0.0;
-      float count1 = 0.0f;
-      for (const auto & p : p1.path.points) {
-        if (p.point.heading_rate_rps != 0.0) {
-          ++count1;
-          sum_k1 += std::abs(p.point.heading_rate_rps);
-        }
-      }
-      float sum_k2 = 0.0;
-      float count2 = 0.0f;
-      for (const auto & p : p2.path.points) {
-        if (p.point.heading_rate_rps != 0.0) {
-          ++count2;
-          sum_k2 += std::abs(p.point.heading_rate_rps);
-        }
-      }
-      return (sum_k1 / count1) < (sum_k2 / count2);
-    });
   for (const auto & candidate : candidates) {
     using universe_utils::Point2d;
     [[maybe_unused]] const auto perpendicular_vector = [&](const Point2d & p1, const Point2d & p2) {

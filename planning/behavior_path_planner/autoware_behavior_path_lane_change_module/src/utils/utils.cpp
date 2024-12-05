@@ -42,6 +42,7 @@
 #include <autoware_lanelet2_extension/utility/utilities.hpp>
 #include <autoware_vehicle_info_utils/vehicle_info.hpp>
 #include <range/v3/algorithm.hpp>
+#include <range/v3/numeric.hpp>
 #include <range/v3/view.hpp>
 #include <rclcpp/rclcpp.hpp>
 
@@ -194,6 +195,32 @@ bool path_footprint_exceeds_target_lane_bound(
   return false;
 }
 
+std::vector<frenet_planner::Trajectory> generate_trajectories(
+  const sampler_common::transform::Spline2D & reference_path,
+  const frenet_planner::FrenetState & initial_state,
+  const frenet_planner::SamplingParameters & sampling_parameters)
+{
+  auto candidates =
+    frenet_planner::generateTrajectories(reference_path, initial_state, sampling_parameters);
+
+  const auto filter_zeros = [](const auto & k) { return k != 0.0; };
+  const auto sums_of_curvatures = [](float sum, const double k) { return sum + std::abs(k); };
+
+  const auto avg_curvature = [&filter_zeros,
+                              &sums_of_curvatures](const std::vector<double> & curvatures) {
+    auto filtered_k = curvatures | ranges::views::filter(filter_zeros);
+    const auto sum_of_k = ranges::accumulate(filtered_k, 0.0, sums_of_curvatures);
+    const auto count_k = static_cast<double>(ranges::distance(filtered_k));
+    return sum_of_k / count_k;
+  };
+
+  ranges::sort(candidates, [&](const auto & p1, const auto & p2) {
+    return avg_curvature(p1.curvatures) < avg_curvature(p2.curvatures);
+  });
+
+  return candidates;
+}
+
 LaneChangePaths get_frenet_paths(
   const CommonDataPtr & common_data_ptr, const PathWithLaneId & target_lane,
   const PathWithLaneId & prepare_segment,
@@ -202,9 +229,7 @@ LaneChangePaths get_frenet_paths(
   const frenet_planner::SamplingParameters & sampling_parameters,
   const LaneChangePhaseMetrics & prepare_metric)
 {
-  LaneChangePaths candidate_paths;
-  const auto candidates =
-    frenet_planner::generateTrajectories(reference_path, initial_state, sampling_parameters);
+  auto candidates = generate_trajectories(reference_path, initial_state, sampling_parameters);
 
   [[maybe_unused]] const auto target_neighbor_ls = std::invoke([&]() {
     universe_utils::LineString2d line_string;
@@ -242,6 +267,7 @@ LaneChangePaths get_frenet_paths(
     return Point2d(p1.x() + nx * offset, p1.y() + ny * offset);
   };
 
+  LaneChangePaths candidate_paths;
   for (const auto & candidate : candidates) {
     ShiftedPath shifted_path;
     PathPointWithLaneId pp;

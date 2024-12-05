@@ -89,6 +89,11 @@ bool path_footprint_exceeds_target_lane_bound(
   const CommonDataPtr & common_data_ptr, const PathWithLaneId & path, const VehicleInfo & ego_info,
   const double margin = 0.1);
 
+std::vector<frenet_planner::Trajectory> generate_trajectories(
+  const sampler_common::transform::Spline2D & reference_path,
+  const frenet_planner::FrenetState & initial_state,
+  const frenet_planner::SamplingParameters & sampling_parameters);
+
 LaneChangePaths get_frenet_paths(
   const CommonDataPtr & common_data_ptr, const PathWithLaneId & target_lane,
   const PathWithLaneId & prepare_segment,
