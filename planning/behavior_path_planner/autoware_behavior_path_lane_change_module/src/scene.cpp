@@ -37,13 +37,13 @@
 #include <autoware/universe_utils/math/unit_conversion.hpp>
 #include <autoware/universe_utils/system/stop_watch.hpp>
 #include <autoware/universe_utils/system/time_keeper.hpp>
+#include <autoware_frenet_planner/frenet_planner.hpp>
 #include <autoware_frenet_planner/structures.hpp>
 #include <autoware_lanelet2_extension/utility/message_conversion.hpp>
 #include <autoware_lanelet2_extension/utility/utilities.hpp>
 #include <range/v3/action/insert.hpp>
-#include <range/v3/algorithm/any_of.hpp>
-#include <range/v3/algorithm/for_each.hpp>
-#include <range/v3/algorithm/sort.hpp>
+#include <range/v3/algorithm.hpp>
+#include <range/v3/numeric/accumulate.hpp>
 #include <range/v3/view.hpp>
 
 #include <boost/geometry/io/svg/svg_mapper.hpp>
@@ -1201,8 +1201,7 @@ std::vector<LaneChangePhaseMetrics> NormalLaneChange::get_lane_changing_metrics(
 LaneChangePaths NormalLaneChange::generate_frenet_candidates(
   const std::vector<LaneChangePhaseMetrics> & metrics) const
 {
-  const auto min_lc_vel = common_data_ptr_->lc_param_ptr->trajectory.min_lane_changing_velocity;
-  LaneChangePaths candidates;
+  std::vector<frenet_planner::Trajectory> frenet_candidates;
   universe_utils::StopWatch<std::chrono::microseconds> sw;
   double prepare_segment_us = 0.0;
   double ref_spline_us = 0.0;
@@ -1236,79 +1235,57 @@ LaneChangePaths NormalLaneChange::generate_frenet_candidates(
 
     const auto target_lane_reference_path = utils::lane_change::get_reference_path_from_target_Lane(
       common_data_ptr_, lc_start_pose, std::min(dist_to_end_from_lc_start, max_lc_len), 0.5);
-    ref_path_us += sw.toc("ref_path");
-
     if (target_lane_reference_path.points.empty()) {
       continue;
     }
 
-    sw.tic("ref_spline");
-    std::vector<double> xs;
-    std::vector<double> ys;
-    xs.reserve(target_lane_reference_path.points.size());
-    ys.reserve(target_lane_reference_path.points.size());
-    for (const auto & p : target_lane_reference_path.points) {
-      xs.push_back(p.point.pose.position.x);
-      ys.push_back(p.point.pose.position.y);
-    }
+    ref_path_us += sw.toc("ref_path");
 
-    sampler_common::transform::Spline2D reference_spline(xs, ys);
+    const auto reference_spline =
+      utils::lane_change::init_reference_spline(target_lane_reference_path.points);
+
+    sw.tic("ref_spline");
     ref_spline_us += sw.toc("ref_spline");
 
-    frenet_planner::FrenetState initial_state;
-    const auto initial_yaw = tf2::getYaw(lc_start_pose.orientation);
-    initial_state.position =
-      reference_spline.frenet({lc_start_pose.position.x, lc_start_pose.position.y});
-    initial_state.longitudinal_velocity = metric.velocity;
-    initial_state.lateral_velocity =
-      0.0;  // TODO(Maxime): this can be sampled if we want but it would impact the LC duration
-    initial_state.longitudinal_acceleration = metric.sampled_lon_accel;
-    initial_state.lateral_acceleration = metric.lat_accel;
-    std::printf(
-      "\tInitial state [s=%2.2f, d=%2.2f, s'=%2.2f, d'=%2.2f, s''=%2.2f, d''=%2.2f], ",
-      initial_state.position.s, initial_state.position.d, initial_state.longitudinal_velocity,
-      initial_state.lateral_velocity, initial_state.longitudinal_acceleration,
-      initial_state.lateral_acceleration);
-    frenet_planner::SamplingParameters sampling_parameters;
-    sampling_parameters.resolution =
-      lane_change_parameters_->safety.collision_check.prediction_time_resolution;
+    const auto initial_state = utils::lane_change::init_frenet_state(
+      reference_spline.frenet({lc_start_pose.position.x, lc_start_pose.position.y}), metric);
 
-    const auto [min_lateral_acc, max_lateral_acc] =
-      lane_change_parameters_->trajectory.lat_acc_map.find(std::max(min_lc_vel, metric.velocity));
+    const auto sampling_parameters_opt = utils::lane_change::init_sampling_parameters(
+      lane_change_parameters_, metric, initial_state, reference_spline, lc_start_pose);
 
-    const auto duration = autoware::motion_utils::calc_shift_time_from_jerk(
-      std::abs(initial_state.position.d), lane_change_parameters_->trajectory.lateral_jerk,
-      max_lateral_acc);
-
-    const auto final_velocity =
-      std::max(min_lc_vel, metric.velocity + metric.sampled_lon_accel * duration);
-
-    const auto lc_length = duration * (metric.velocity + final_velocity) * 0.5;
-    const auto target_s = initial_state.position.s + lc_length;
-    sampling_parameters.parameters.emplace_back();
-    sampling_parameters.parameters.back().target_duration = duration;
-    sampling_parameters.parameters.back().target_state.position = {target_s, 0.0};
-    // TODO(Maxime): not sure if we should use curvature at initial or target s
-    const auto target_lat_vel =
-      (1 - reference_spline.curvature(target_s + 1e-3) * initial_state.position.d) *
-      std::tan(initial_yaw - reference_spline.yaw(target_s));
-    sampling_parameters.parameters.back().target_state.lateral_velocity = target_lat_vel;
-    if (std::isnan(target_lat_vel)) {
-      std::cout << " Skipped (invalid target lateral velocity)\n";
+    if (!sampling_parameters_opt) {
       continue;
     }
-    sampling_parameters.parameters.back().target_state.lateral_acceleration = 0.0;
-    sampling_parameters.parameters.back().target_state.longitudinal_velocity = final_velocity;
-    sampling_parameters.parameters.back().target_state.longitudinal_acceleration =
-      metric.sampled_lon_accel;
-    std::cout << " Target : " << sampling_parameters.parameters.back() << "\n";
+    auto frenet_trajectories = frenet_planner::generateTrajectories(
+      reference_spline, initial_state, *sampling_parameters_opt);
+
     sw.tic("gen");
-    auto frenet_candidates = utils::lane_change::get_frenet_paths(
-      common_data_ptr_, target_lane_reference_path, prepare_segment, reference_spline,
-      initial_state, sampling_parameters, metric);
+    // auto frenet_candidates = utils::lane_change::get_frenet_paths(
+    //   common_data_ptr_, target_lane_reference_path, prepare_segment, reference_spline,
+    //   initial_state, sampling_parameters, metric);
     gen_us += sw.toc("gen");
-    std::move(frenet_candidates.begin(), frenet_candidates.end(), std::back_inserter(candidates));
+    std::move(
+      frenet_trajectories.begin(), frenet_trajectories.end(),
+      std::back_inserter(frenet_candidates));
   }
+
+  utils::lane_change::process_frenet_candidates(common_data_ptr_, frenet_candidates);
+
+  auto candidates = utils::lane_change::get_frenet_paths(target_lan, const PathWithLaneId &prepare_segment, const LaneChangePhaseMetrics &prepare_metric, const frenet_planner::FrenetState &initial_state, const std::vector<frenet_planner::Trajectory> &candidates)
+
+  const auto avg_curvature = [](const std::vector<double> & curvatures) {
+    const auto filter_zeros = [](const auto & k) { return k != 0.0; };
+    const auto sums_of_curvatures = [](float sum, const double k) { return sum + std::abs(k); };
+    auto filtered_k = curvatures | ranges::views::filter(filter_zeros);
+    const auto sum_of_k = ranges::accumulate(filtered_k, 0.0, sums_of_curvatures);
+    const auto count_k = static_cast<double>(ranges::distance(filtered_k));
+    return sum_of_k / count_k;
+  };
+
+  ranges::sort(frenet_candidates, [&](const auto & p1, const auto & p2) {
+    return avg_curvature(p1.curvatures) < avg_curvature(p2.curvatures);
+  });
+
   // sort by average curvature along the lane changing portion of the path
   for (const auto & candidate : candidates) {
     using universe_utils::Point2d;

@@ -28,6 +28,7 @@
 #include <fstream>
 #include <iostream>
 // for the geometry types
+#include <autoware/motion_utils/trajectory/path_shift.hpp>
 #include <autoware/universe_utils/geometry/boost_geometry.hpp>
 // for the svg mapper
 #include <autoware/behavior_path_planner_common/utils/path_safety_checker/objects_filtering.hpp>
@@ -42,6 +43,7 @@
 #include <autoware_lanelet2_extension/utility/utilities.hpp>
 #include <autoware_vehicle_info_utils/vehicle_info.hpp>
 #include <range/v3/algorithm.hpp>
+#include <range/v3/action/remove_if.hpp>
 #include <range/v3/numeric.hpp>
 #include <range/v3/view.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -195,29 +197,81 @@ bool path_footprint_exceeds_target_lane_bound(
   return false;
 }
 
-std::vector<frenet_planner::Trajectory> generate_trajectories(
-  const CommonDataPtr & common_data_ptr, const sampler_common::transform::Spline2D & reference_path,
-  const frenet_planner::FrenetState & initial_state,
-  const frenet_planner::SamplingParameters & sampling_parameters)
+sampler_common::transform::Spline2D init_reference_spline(
+  const std::vector<PathPointWithLaneId> & target_lanes_ref_path)
 {
-  auto candidates =
-    frenet_planner::generateTrajectories(reference_path, initial_state, sampling_parameters);
+  std::vector<double> xs;
+  std::vector<double> ys;
+  xs.reserve(target_lanes_ref_path.size());
+  ys.reserve(target_lanes_ref_path.size());
+  for (const auto & p : target_lanes_ref_path) {
+    xs.push_back(p.point.pose.position.x);
+    ys.push_back(p.point.pose.position.y);
+  }
 
-  const auto filter_zeros = [](const auto & k) { return k != 0.0; };
-  const auto sums_of_curvatures = [](float sum, const double k) { return sum + std::abs(k); };
+  return {xs, ys};
+}
+frenet_planner::FrenetState init_frenet_state(
+  const sampler_common::FrenetPoint & start_position,
+  const LaneChangePhaseMetrics & prepare_metrics)
+{
+  frenet_planner::FrenetState initial_state;
+  initial_state.position = start_position;
+  initial_state.longitudinal_velocity = prepare_metrics.velocity;
+  initial_state.lateral_velocity =
+    0.0;  // TODO(Maxime): this can be sampled if we want but it would impact the LC duration
+  initial_state.longitudinal_acceleration = prepare_metrics.sampled_lon_accel;
+  initial_state.lateral_acceleration = prepare_metrics.lat_accel;
+  std::printf(
+    "\tInitial state [s=%2.2f, d=%2.2f, s'=%2.2f, d'=%2.2f, s''=%2.2f, d''=%2.2f], ",
+    initial_state.position.s, initial_state.position.d, initial_state.longitudinal_velocity,
+    initial_state.lateral_velocity, initial_state.longitudinal_acceleration,
+    initial_state.lateral_acceleration);
+  return initial_state;
+}
 
-  const auto avg_curvature = [&filter_zeros,
-                              &sums_of_curvatures](const std::vector<double> & curvatures) {
-    auto filtered_k = curvatures | ranges::views::filter(filter_zeros);
-    const auto sum_of_k = ranges::accumulate(filtered_k, 0.0, sums_of_curvatures);
-    const auto count_k = static_cast<double>(ranges::distance(filtered_k));
-    return sum_of_k / count_k;
-  };
+std::optional<frenet_planner::SamplingParameters> init_sampling_parameters(
+  const LCParamPtr & lc_param_ptr, const LaneChangePhaseMetrics & prepare_metrics,
+  const frenet_planner::FrenetState & initial_state,
+  const sampler_common::transform::Spline2D & ref_spline, const Pose & lc_start_pose)
+{
+  const auto min_lc_vel = lc_param_ptr->trajectory.min_lane_changing_velocity;
+  const auto [min_lateral_acc, max_lateral_acc] =
+    lc_param_ptr->trajectory.lat_acc_map.find(std::max(min_lc_vel, prepare_metrics.velocity));
+  const auto duration = autoware::motion_utils::calc_shift_time_from_jerk(
+    std::abs(initial_state.position.d), lc_param_ptr->trajectory.lateral_jerk, max_lateral_acc);
+  const auto final_velocity =
+    std::max(min_lc_vel, prepare_metrics.velocity + prepare_metrics.sampled_lon_accel * duration);
+  const auto lc_length = duration * (prepare_metrics.velocity + final_velocity) * 0.5;
+  const auto target_s = initial_state.position.s + lc_length;
+  const auto initial_yaw = tf2::getYaw(lc_start_pose.orientation);
+  const auto target_lat_vel =
+    (1 - ref_spline.curvature(target_s + 1e-3) * initial_state.position.d) *
+    std::tan(initial_yaw - ref_spline.yaw(target_s));
 
-  ranges::sort(candidates, [&](const auto & p1, const auto & p2) {
-    return avg_curvature(p1.curvatures) < avg_curvature(p2.curvatures);
-  });
+  if (std::isnan(target_lat_vel)) {
+    std::cout << " Skipped (invalid target lateral velocity)\n";
+    return std::nullopt;
+  }
 
+  frenet_planner::SamplingParameters sampling_parameters;
+  sampling_parameters.resolution = lc_param_ptr->safety.collision_check.prediction_time_resolution;
+  sampling_parameters.parameters.emplace_back();
+  sampling_parameters.parameters.back().target_duration = duration;
+  sampling_parameters.parameters.back().target_state.position = {target_s, 0.0};
+  // TODO(Maxime): not sure if we should use curvature at initial or target s
+  sampling_parameters.parameters.back().target_state.lateral_velocity = target_lat_vel;
+  sampling_parameters.parameters.back().target_state.lateral_acceleration = 0.0;
+  sampling_parameters.parameters.back().target_state.longitudinal_velocity = final_velocity;
+  sampling_parameters.parameters.back().target_state.longitudinal_acceleration =
+    prepare_metrics.sampled_lon_accel;
+  std::cout << " Target : " << sampling_parameters.parameters.back() << "\n";
+  return sampling_parameters;
+}
+
+void process_frenet_candidates(
+  const CommonDataPtr & common_data_ptr, std::vector<frenet_planner::Trajectory> & candidates)
+{
   const auto lane_boundary = std::invoke([&]() {
     universe_utils::LineString2d line_string;
     const auto & get_bound = [&](const lanelet::ConstLanelet & lane) {
@@ -258,56 +312,30 @@ std::vector<frenet_planner::Trajectory> generate_trajectories(
     return Point2d(p1.x() + nx * offset, p1.y() + ny * offset);
   };
 
-  decltype(candidates) frenet_candidate;
+  candidates |= ranges::actions::remove_if([&](const auto & candidate) {
+    if (candidate.poses.size() <= 2) {
+      return true;  // Remove candidates with insufficient poses
+    }
 
-  for (const auto & candidate : candidates) {
     universe_utils::LineString2d path_ls;
-    if (candidate.poses.size() > 2) {
-      path_ls.reserve(candidate.poses.size());
+    path_ls.reserve(candidate.poses.size());
 
-      const auto segment = candidate.poses | ranges::views::sliding(2);
-      ranges::for_each(segment | ranges::views::drop(1), [&](const auto & segment) {
-        const auto & p1 = segment[0].position;
-        const auto & p2 = segment[1].position;
+    const auto segments = candidate.poses | ranges::views::sliding(2);
+    ranges::for_each(segments | ranges::views::drop(1), [&](const auto & segment) {
+      const auto & p1 = segment[0].position;
+      const auto & p2 = segment[1].position;
+      boost::geometry::append(path_ls, shift_point({p1.x, p1.y}, {p2.x, p2.y}));
+    });
 
-        boost::geometry::append(path_ls, shift_point({p1.x, p1.y}, {p2.x, p2.y}));
-      });
-    }
-    std::cout << path_ls.size() << " " << lane_boundary.size() << '\n';
-
-    if (boost::geometry::disjoint(path_ls, lane_boundary)) {
-      continue;
-    }
-
-    if (frenet_candidate.empty()) {
-      std::ofstream svg("/home/zulfaqar/Pictures/image2.svg");  // /!\ CHANGE PATH
-      boost::geometry::svg_mapper<Point2d> mapper(svg, 1800, 1800);
-      const auto & target_neigh = common_data_ptr->lanes_polygon_ptr->target_neighbor;
-      mapper.add(target_neigh);
-      mapper.add(path_ls);
-      mapper.add(lane_boundary);
-      mapper.map(path_ls, "fill-opacity:0.5;fill:none;stroke:green;stroke-width:2");
-      mapper.map(lane_boundary, "fill-opacity:1.0;fill:none;stroke:black;stroke-width:1");
-      mapper.map(target_neigh, "fill-opacity:0.7;fill:pink;stroke:red;stroke-width:2");
-    }
-
-    frenet_candidate.push_back(candidate);
-  }
-
-  return frenet_candidate;
+    return boost::geometry::disjoint(path_ls, lane_boundary);  // Remove if disjoint
+  });
 }
 
 LaneChangePaths get_frenet_paths(
-  const CommonDataPtr & common_data_ptr, const PathWithLaneId & target_lane,
-  const PathWithLaneId & prepare_segment,
-  const sampler_common::transform::Spline2D & reference_path,
-  const frenet_planner::FrenetState & initial_state,
-  const frenet_planner::SamplingParameters & sampling_parameters,
-  const LaneChangePhaseMetrics & prepare_metric)
+  const PathWithLaneId & target_lane, const PathWithLaneId & prepare_segment,
+  const LaneChangePhaseMetrics & prepare_metric, const frenet_planner::FrenetState & initial_state,
+  const std::vector<frenet_planner::Trajectory> & candidates)
 {
-  auto candidates =
-    generate_trajectories(common_data_ptr, reference_path, initial_state, sampling_parameters);
-
   LaneChangePaths candidate_paths;
   for (const auto & candidate : candidates) {
     ShiftedPath shifted_path;
