@@ -42,8 +42,8 @@
 #include <autoware_lanelet2_extension/utility/query.hpp>
 #include <autoware_lanelet2_extension/utility/utilities.hpp>
 #include <autoware_vehicle_info_utils/vehicle_info.hpp>
-#include <range/v3/algorithm.hpp>
 #include <range/v3/action/remove_if.hpp>
+#include <range/v3/algorithm.hpp>
 #include <range/v3/numeric.hpp>
 #include <range/v3/view.hpp>
 #include <rclcpp/rclcpp.hpp>
@@ -139,7 +139,6 @@ lanelet::ConstLanelets get_target_neighbor_lanes(
       }
     }
   }
-
   return neighbor_lanes;
 }
 
@@ -211,6 +210,7 @@ sampler_common::transform::Spline2D init_reference_spline(
 
   return {xs, ys};
 }
+
 frenet_planner::FrenetState init_frenet_state(
   const sampler_common::FrenetPoint & start_position,
   const LaneChangePhaseMetrics & prepare_metrics)
@@ -269,8 +269,9 @@ std::optional<frenet_planner::SamplingParameters> init_sampling_parameters(
   return sampling_parameters;
 }
 
-void process_frenet_candidates(
-  const CommonDataPtr & common_data_ptr, std::vector<frenet_planner::Trajectory> & candidates)
+void filter_out_of_bound_trajectories(
+  const CommonDataPtr & common_data_ptr,
+  std::vector<lane_change::TrajectoryGroup> & trajectory_groups)
 {
   const auto lane_boundary = std::invoke([&]() {
     universe_utils::LineString2d line_string;
@@ -312,15 +313,15 @@ void process_frenet_candidates(
     return Point2d(p1.x() + nx * offset, p1.y() + ny * offset);
   };
 
-  candidates |= ranges::actions::remove_if([&](const auto & candidate) {
-    if (candidate.poses.size() <= 2) {
+  trajectory_groups |= ranges::actions::remove_if([&](const TrajectoryGroup & candidate) {
+    if (candidate.lane_changing.poses.size() <= 2) {
       return true;  // Remove candidates with insufficient poses
     }
 
     universe_utils::LineString2d path_ls;
-    path_ls.reserve(candidate.poses.size());
+    path_ls.reserve(candidate.lane_changing.poses.size());
 
-    const auto segments = candidate.poses | ranges::views::sliding(2);
+    const auto segments = candidate.lane_changing.poses | ranges::views::sliding(2);
     ranges::for_each(segments | ranges::views::drop(1), [&](const auto & segment) {
       const auto & p1 = segment[0].position;
       const auto & p2 = segment[1].position;
@@ -331,34 +332,36 @@ void process_frenet_candidates(
   });
 }
 
-LaneChangePaths get_frenet_paths(
-  const PathWithLaneId & target_lane, const PathWithLaneId & prepare_segment,
-  const LaneChangePhaseMetrics & prepare_metric, const frenet_planner::FrenetState & initial_state,
-  const std::vector<frenet_planner::Trajectory> & candidates)
+LaneChangePaths get_frenet_paths(const std::vector<TrajectoryGroup> & trajectory_groups)
 {
   LaneChangePaths candidate_paths;
-  for (const auto & candidate : candidates) {
+  for (const auto & trajectory_group : trajectory_groups) {
     ShiftedPath shifted_path;
     PathPointWithLaneId pp;
     auto ref_s = 0.0;
     auto ref_i = 0UL;
-    for (auto i = 0UL; i < candidate.poses.size(); ++i) {
-      const auto s = candidate.frenet_points[i].s;
-      pp.point.pose = candidate.poses[i];
-      pp.point.longitudinal_velocity_mps = static_cast<float>(candidate.longitudinal_velocities[i]);
-      pp.point.lateral_velocity_mps = static_cast<float>(candidate.lateral_velocities[i]);
+    const auto & lane_changing_candidate = trajectory_group.lane_changing;
+    const auto & target_lane_ref_path = trajectory_group.target_lane_ref_path;
+    const auto & prepare_segment = trajectory_group.prepare;
+    const auto & prepare_metric = trajectory_group.prepare_metric;
+    const auto & initial_state = trajectory_group.initial_state;
+    for (auto i = 0UL; i < lane_changing_candidate.poses.size(); ++i) {
+      const auto s = lane_changing_candidate.frenet_points[i].s;
+      pp.point.pose = lane_changing_candidate.poses[i];
+      pp.point.longitudinal_velocity_mps = static_cast<float>(lane_changing_candidate.longitudinal_velocities[i]);
+      pp.point.lateral_velocity_mps = static_cast<float>(lane_changing_candidate.lateral_velocities[i]);
       pp.point.heading_rate_rps = static_cast<float>(
-        candidate.curvatures[i]);  // TODO(Maxime): dirty way to attach the curvature at each point
+        lane_changing_candidate.curvatures[i]);  // TODO(Maxime): dirty way to attach the curvature at each point
       // copy from original reference path
-      while (ref_s < s && ref_i + 1 < target_lane.points.size()) {
+      while (ref_s < s && ref_i + 1 < target_lane_ref_path.points.size()) {
         ++ref_i;
         ref_s +=
-          universe_utils::calcDistance2d(target_lane.points[ref_i - 1], target_lane.points[ref_i]);
+          universe_utils::calcDistance2d(target_lane_ref_path.points[ref_i - 1], target_lane_ref_path.points[ref_i]);
       }
-      pp.point.pose.position.z = target_lane.points[ref_i].point.pose.position.z;
-      pp.lane_ids = target_lane.points[ref_i].lane_ids;
+      pp.point.pose.position.z = target_lane_ref_path.points[ref_i].point.pose.position.z;
+      pp.lane_ids = target_lane_ref_path.points[ref_i].lane_ids;
 
-      shifted_path.shift_length.push_back(candidate.frenet_points[i].d);
+      shifted_path.shift_length.push_back(lane_changing_candidate.frenet_points[i].d);
       shifted_path.path.points.push_back(pp);
     }
     if (shifted_path.path.points.empty()) {
@@ -366,9 +369,9 @@ LaneChangePaths get_frenet_paths(
     }
 
     const auto nearest_segment_idx = autoware::motion_utils::findNearestSegmentIndex(
-      target_lane.points, shifted_path.path.points.back().point.pose.position);
-    for (auto i = nearest_segment_idx + 2; i < target_lane.points.size(); ++i) {
-      shifted_path.path.points.push_back(target_lane.points[i]);
+      target_lane_ref_path.points, shifted_path.path.points.back().point.pose.position);
+    for (auto i = nearest_segment_idx + 2; i < target_lane_ref_path.points.size(); ++i) {
+      shifted_path.path.points.push_back(target_lane_ref_path.points[i]);
       shifted_path.shift_length.push_back(0.0);
     }
     const auto lane_change_end_idx = autoware::motion_utils::findNearestIndex(
@@ -400,10 +403,10 @@ LaneChangePaths get_frenet_paths(
 
     LaneChangeInfo info;
     info.longitudinal_acceleration = {
-      prepare_metric.actual_lon_accel, candidate.longitudinal_accelerations.front()};
+      prepare_metric.actual_lon_accel, lane_changing_candidate.longitudinal_accelerations.front()};
     info.velocity = {prepare_metric.velocity, initial_state.longitudinal_velocity};
-    info.duration = {prepare_metric.duration, candidate.sampling_parameter.target_duration};
-    info.length = {prepare_metric.length, candidate.lengths.back()};
+    info.duration = {prepare_metric.duration, lane_changing_candidate.sampling_parameter.target_duration};
+    info.length = {prepare_metric.length, lane_changing_candidate.lengths.back()};
 
     std::printf(
       "p: l=%2.2f, t=%2.2f, v=%2.2f, a=%2.2f | lc: l=%2.2f, t=%2.2f, v=%2.2f, a=%2.2f",
@@ -413,14 +416,14 @@ LaneChangePaths get_frenet_paths(
       info.longitudinal_acceleration.lane_changing);
 
     info.lane_changing_start = prepare_segment.points.back().point.pose;
-    info.lane_changing_end = candidate.poses.back();
+    info.lane_changing_end = lane_changing_candidate.poses.back();
 
     ShiftLine sl;
 
-    sl.start = candidate.poses.front();
+    sl.start = lane_changing_candidate.poses.front();
     // prepare_segment.points.back() .point.pose;  // TODO(Maxime): should it be 1st point of
-    // candidate ?
-    sl.end = candidate.poses.back();
+    // lane_changing_candidate ?
+    sl.end = lane_changing_candidate.poses.back();
     sl.start_shift_length = 0.0;
     sl.end_shift_length = initial_state.position.d;
     sl.start_idx = 0UL;
@@ -428,8 +431,8 @@ LaneChangePaths get_frenet_paths(
 
     info.shift_line = sl;
 
-    info.terminal_lane_changing_velocity = candidate.longitudinal_velocities.back();
-    info.lateral_acceleration = candidate.lateral_accelerations.front();
+    info.terminal_lane_changing_velocity = lane_changing_candidate.longitudinal_velocities.back();
+    info.lateral_acceleration = lane_changing_candidate.lateral_accelerations.front();
 
     LaneChangePath candidate_path;
     candidate_path.path = utils::combinePath(prepare_segment, shifted_path.path);

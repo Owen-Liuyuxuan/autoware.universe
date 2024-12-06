@@ -58,6 +58,7 @@ using behavior_path_planner::lane_change::LCParamPtr;
 using behavior_path_planner::lane_change::ModuleType;
 using behavior_path_planner::lane_change::PathSafetyStatus;
 using behavior_path_planner::lane_change::TargetLaneLeadingObjects;
+using behavior_path_planner::lane_change::TrajectoryGroup;
 using geometry_msgs::msg::Point;
 using geometry_msgs::msg::Pose;
 using geometry_msgs::msg::Twist;
@@ -101,19 +102,16 @@ std::optional<frenet_planner::SamplingParameters> init_sampling_parameters(
   const frenet_planner::FrenetState & initial_state,
   const sampler_common::transform::Spline2D & ref_spline, const Pose & lc_start_pose);
 
-void process_frenet_candidates(
+void filter_out_of_bound_trajectories(
   const CommonDataPtr & common_data_ptr,
-  std::vector<frenet_planner::Trajectory> & candidates);
+  std::vector<lane_change::TrajectoryGroup> & trajectory_groups);
 
-LaneChangePaths get_frenet_paths(
-  const PathWithLaneId & target_lane, const PathWithLaneId & prepare_segment,
-  const LaneChangePhaseMetrics & prepare_metric, const frenet_planner::FrenetState & initial_state,
-  const std::vector<frenet_planner::Trajectory> & candidates);
+LaneChangePaths get_frenet_paths(const std::vector<TrajectoryGroup> & trajectory_groups);
 
-  std::optional<LaneChangePath> construct_candidate_path(
-    const LaneChangeInfo & lane_change_info, const PathWithLaneId & prepare_segment,
-    const PathWithLaneId & target_lane_reference_path,
-    const std::vector<std::vector<int64_t>> & sorted_lane_ids);
+std::optional<LaneChangePath> construct_candidate_path(
+  const LaneChangeInfo & lane_change_info, const PathWithLaneId & prepare_segment,
+  const PathWithLaneId & target_lane_reference_path,
+  const std::vector<std::vector<int64_t>> & sorted_lane_ids);
 
 ShiftLine get_lane_changing_shift_line(
   const Pose & lane_changing_start_pose, const Pose & lane_changing_end_pose,

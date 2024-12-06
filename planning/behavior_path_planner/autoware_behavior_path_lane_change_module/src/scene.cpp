@@ -1201,7 +1201,7 @@ std::vector<LaneChangePhaseMetrics> NormalLaneChange::get_lane_changing_metrics(
 LaneChangePaths NormalLaneChange::generate_frenet_candidates(
   const std::vector<LaneChangePhaseMetrics> & metrics) const
 {
-  std::vector<frenet_planner::Trajectory> frenet_candidates;
+  std::vector<lane_change::TrajectoryGroup> trajectory_groups;
   universe_utils::StopWatch<std::chrono::microseconds> sw;
   double prepare_segment_us = 0.0;
   double ref_spline_us = 0.0;
@@ -1210,6 +1210,7 @@ LaneChangePaths NormalLaneChange::generate_frenet_candidates(
 
   const auto & transient_data = common_data_ptr_->transient_data;
 
+  trajectory_groups.reserve(metrics.size());
   for (const auto & metric : metrics) {
     PathWithLaneId prepare_segment;
     try {
@@ -1256,6 +1257,7 @@ LaneChangePaths NormalLaneChange::generate_frenet_candidates(
     if (!sampling_parameters_opt) {
       continue;
     }
+
     auto frenet_trajectories = frenet_planner::generateTrajectories(
       reference_spline, initial_state, *sampling_parameters_opt);
 
@@ -1264,14 +1266,12 @@ LaneChangePaths NormalLaneChange::generate_frenet_candidates(
     //   common_data_ptr_, target_lane_reference_path, prepare_segment, reference_spline,
     //   initial_state, sampling_parameters, metric);
     gen_us += sw.toc("gen");
-    std::move(
-      frenet_trajectories.begin(), frenet_trajectories.end(),
-      std::back_inserter(frenet_candidates));
+
+    ranges::for_each(frenet_trajectories, [&](const auto & frenet_trajectory) {
+      trajectory_groups.emplace_back(
+        prepare_segment, target_lane_reference_path, metric, frenet_trajectory, initial_state);
+    });
   }
-
-  utils::lane_change::process_frenet_candidates(common_data_ptr_, frenet_candidates);
-
-  auto candidates = utils::lane_change::get_frenet_paths(target_lan, const PathWithLaneId &prepare_segment, const LaneChangePhaseMetrics &prepare_metric, const frenet_planner::FrenetState &initial_state, const std::vector<frenet_planner::Trajectory> &candidates)
 
   const auto avg_curvature = [](const std::vector<double> & curvatures) {
     const auto filter_zeros = [](const auto & k) { return k != 0.0; };
@@ -1282,14 +1282,19 @@ LaneChangePaths NormalLaneChange::generate_frenet_candidates(
     return sum_of_k / count_k;
   };
 
-  ranges::sort(frenet_candidates, [&](const auto & p1, const auto & p2) {
-    return avg_curvature(p1.curvatures) < avg_curvature(p2.curvatures);
+  ranges::sort(trajectory_groups, [&](const auto & p1, const auto & p2) {
+    return avg_curvature(p1.lane_changing.curvatures) < avg_curvature(p2.lane_changing.curvatures);
   });
+
+  // utils::lane_change::filter_out_of_bound_trajectories(common_data_ptr_, trajectory_groups);
+
+  const auto candidates = utils::lane_change::get_frenet_paths(trajectory_groups);
 
   // sort by average curvature along the lane changing portion of the path
   for (const auto & candidate : candidates) {
     using universe_utils::Point2d;
-    [[maybe_unused]] const auto perpendicular_vector = [&](const Point2d & p1, const Point2d & p2) {
+    [[maybe_unused]] const auto perpendicular_vector = [&](const Point2d & p1, const Point2d &
+    p2) {
       const auto direction = common_data_ptr_->direction;
       const auto left_side = direction == Direction::LEFT;
       const auto distance = (0.5 * common_data_ptr_->bpp_param_ptr->vehicle_width + 0.1);

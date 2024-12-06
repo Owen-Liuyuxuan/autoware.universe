@@ -19,6 +19,8 @@
 #include "autoware/behavior_path_planner_common/turn_signal_decider.hpp"
 #include "autoware/behavior_path_planner_common/utils/path_shifter/path_shifter.hpp"
 
+#include <autoware_frenet_planner/structures.hpp>
+
 #include <tier4_planning_msgs/msg/path_with_lane_id.hpp>
 
 #include <vector>
@@ -32,6 +34,28 @@ struct Path
   PathWithLaneId path;
   ShiftedPath shifted_path;
   Info info;
+};
+
+struct TrajectoryGroup
+{
+  PathWithLaneId prepare;
+  PathWithLaneId target_lane_ref_path;
+  LaneChangePhaseMetrics prepare_metric;
+  frenet_planner::Trajectory lane_changing;
+  frenet_planner::FrenetState initial_state;
+
+  TrajectoryGroup() = default;
+  TrajectoryGroup(
+    PathWithLaneId prepare, PathWithLaneId target_lane_ref_path,
+    LaneChangePhaseMetrics prepare_metric, frenet_planner::Trajectory lane_changing,
+    frenet_planner::FrenetState initial_state)
+  : prepare(std::move(prepare)),
+    target_lane_ref_path(std::move(target_lane_ref_path)),
+    prepare_metric(prepare_metric),
+    lane_changing(std::move(lane_changing)),
+    initial_state(initial_state)
+  {
+  }
 };
 
 struct Status

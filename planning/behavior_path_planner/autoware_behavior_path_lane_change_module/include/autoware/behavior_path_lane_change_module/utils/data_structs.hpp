@@ -72,6 +72,7 @@ struct PhaseMetrics
   double actual_lon_accel{0.0};
   double lat_accel{0.0};
 
+  PhaseMetrics() = default;
   PhaseMetrics(
     const double _duration, const double _length, const double _velocity,
     const double _sampled_lon_accel, const double _actual_lon_accel, const double _lat_accel)
