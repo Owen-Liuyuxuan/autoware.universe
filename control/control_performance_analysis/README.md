@@ -65,7 +65,7 @@ Error acceleration calculations are made based on the velocity calculations abov
 | `longitudinal_error_acceleration`          | float | [m / s^2]                                                                                                         |
 | `heading_error`                            | float | [rad]                                                                                                             |
 | `heading_error_velocity`                   | float | [rad / s]                                                                                                         |
-| `control_effort_energy`                    | float | [u * R * u^T]                                                                                                     |
+| `control_effort_energy`                    | float | [u *R* u^T]                                                                                                       |
 | `error_energy`                             | float | lateral_error^2 + heading_error^2                                                                                 |
 | `value_approximation`                      | float | V = xPx' ; Value function from DARE Lyap matrix P                                                                 |
 | `curvature_estimate`                       | float | [1 / m]                                                                                                           |
