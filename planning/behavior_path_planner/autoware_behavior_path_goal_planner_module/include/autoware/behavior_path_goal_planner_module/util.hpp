@@ -28,6 +28,8 @@
 #include <visualization_msgs/msg/marker_array.hpp>
 
 #include <lanelet2_core/Forward.h>
+#include <lanelet2_core/geometry/BoundingBox.h>
+#include "autoware_utils/geometry/boost_geometry.hpp"
 
 #include <map>
 #include <memory>
@@ -44,7 +46,33 @@ using geometry_msgs::msg::Twist;
 using visualization_msgs::msg::Marker;
 using visualization_msgs::msg::MarkerArray;
 using Shape = autoware_perception_msgs::msg::Shape;
+using autoware_utils::Point2d;
+using Segment2d = boost::geometry::model::segment<Point2d>;
 using Polygon2d = autoware_utils::Polygon2d;
+using LineString2d = boost::geometry::model::linestring<Point2d>;
+using SegmentRtree = boost::geometry::index::rtree<Segment2d, boost::geometry::index::rstar<16>>;
+
+bool has_types(const lanelet::ConstLineString3d & ls, const std::vector<std::string> & types);
+
+bool isPointOnLeftSide(const Point2d& point, const Segment2d& segment);
+
+SegmentRtree getRoadBorders(
+  const RouteHandler & route_handler, const geometry_msgs::msg::Pose ego_pos, const double search_distance);
+
+bool isVehicleSeparatedByRoadBorder(
+  const autoware_perception_msgs::msg::PredictedObject& object,
+  const geometry_msgs::msg::Pose& ego_pose,
+  const SegmentRtree& road_borders);
+
+bool areObjectsTrulySeparatedByRoadBorder(
+  const Point2d& point1, 
+  const Point2d& point2, 
+  const SegmentRtree& road_borders);
+
+autoware_perception_msgs::msg::PredictedObjects filterRelevantObjects(
+  const autoware_perception_msgs::msg::PredictedObjects& objects,
+  const geometry_msgs::msg::Pose& ego_pose,
+  const SegmentRtree& road_borders);
 
 lanelet::ConstLanelets getPullOverLanes(
   const RouteHandler & route_handler, const bool left_side, const double backward_distance,

@@ -50,6 +50,155 @@ using autoware_utils::create_marker_color;
 using autoware_utils::create_marker_scale;
 using autoware_utils::create_point;
 
+bool has_types(const lanelet::ConstLineString3d & ls, const std::vector<std::string> & types)
+{
+  constexpr auto no_type = "";
+  const auto type = ls.attributeOr(lanelet::AttributeName::Type, no_type);
+  return (type != no_type && std::find(types.begin(), types.end(), type) != types.end());
+}
+
+SegmentRtree getRoadBorders(
+  const RouteHandler & route_handler, const geometry_msgs::msg::Pose ego_pos, const double search_distance)
+{
+  SegmentRtree uncrossable_segments_in_range;
+  auto lanelet_map = route_handler.getLaneletMapPtr();
+  const auto ego_p = Point2d{ego_pos.position.x, ego_pos.position.y};
+  std::vector<std::string> uncrossable_types = {"road_border", "guard_rail"};
+  const auto& line_string_layer = lanelet_map->lineStringLayer;
+
+  const auto bbox = lanelet::BoundingBox2d(
+    lanelet::BasicPoint2d{
+      ego_pos.position.x - search_distance, ego_pos.position.y - search_distance},
+    lanelet::BasicPoint2d{
+      ego_pos.position.x + search_distance, ego_pos.position.y + search_distance});
+
+  auto nearby_linestrings = line_string_layer.search(bbox);
+  LineString2d line;
+  for (const auto & ls : nearby_linestrings) { // We are looping through linestrings, this should be cache instead
+    if (has_types(ls, uncrossable_types)) {
+      line.clear();
+      for (const auto & p : ls) line.push_back(Point2d{p.x(), p.y()});
+      for (auto segment_idx = 0LU; segment_idx + 1 < line.size(); ++segment_idx) {
+        Segment2d segment = {line[segment_idx], line[segment_idx + 1]};
+        if (boost::geometry::distance(segment, ego_p) < search_distance) {
+          uncrossable_segments_in_range.insert(segment);
+        }
+      }
+    }
+  }
+  return uncrossable_segments_in_range;
+}
+
+
+// Check if two objects are truly separated by road segments
+bool areObjectsTrulySeparatedByRoadBorder(
+  const Point2d& point1, 
+  const Point2d& point2, 
+  const SegmentRtree& road_borders)
+{
+  // Create a line segment from point1 to point2
+  Segment2d connecting_segment = {point1, point2};
+  
+  // Calculate bounding box around the connecting segment
+  double min_x = std::min(point1.x(), point2.x());
+  double min_y = std::min(point1.y(), point2.y());
+  double max_x = std::max(point1.x(), point2.x());
+  double max_y = std::max(point1.y(), point2.y());
+  
+  // Add a buffer around the bounding box
+  const double buffer = 1.0;  // 1 meter buffer
+  min_x -= buffer;
+  min_y -= buffer;
+  max_x += buffer;
+  max_y += buffer;
+  
+  // Create a box for spatial query
+  boost::geometry::model::box<Point2d> search_box(
+    Point2d(min_x, min_y), 
+    Point2d(max_x, max_y)
+  );
+  
+  // Find all road segments within this search box
+  std::vector<Segment2d> candidate_segments;
+  road_borders.query(boost::geometry::index::intersects(search_box), 
+                    std::back_inserter(candidate_segments));
+  
+  // Check for actual intersections with the connecting line
+  for (const auto& road_segment : candidate_segments) {
+    // Check if the road segment intersects with our connecting segment
+    if (boost::geometry::intersects(connecting_segment, road_segment)) {
+      return true;  // Found a road segment that truly separates the two points
+    }
+  }
+  
+  return false;  // No separating road segment found
+}
+
+// Check if a vehicle is separated from ego by road borders
+bool isVehicleSeparatedByRoadBorder(
+  const autoware_perception_msgs::msg::PredictedObject& object,
+  const geometry_msgs::msg::Pose& ego_pose,
+  const SegmentRtree& road_borders) 
+{
+  // Get object center point
+  Point2d object_center;
+  
+  // Handle different shape types
+  if (object.shape.type == autoware_perception_msgs::msg::Shape::POLYGON && 
+      !object.shape.footprint.points.empty()) {
+    double sum_x = 0.0, sum_y = 0.0;
+    for (const auto& point : object.shape.footprint.points) {
+      sum_x += point.x;
+      sum_y += point.y;
+    }
+    object_center = Point2d(sum_x / object.shape.footprint.points.size(), 
+                           sum_y / object.shape.footprint.points.size());
+  } else {
+    // For bounding box, cylinder, or if footprint is empty, use object position
+    object_center = Point2d(object.kinematics.initial_pose_with_covariance.pose.position.x,
+                           object.kinematics.initial_pose_with_covariance.pose.position.y);
+  }
+  
+  // Get ego position
+  const auto ego_point = Point2d(ego_pose.position.x, ego_pose.position.y);
+  
+  // Check if ego and object are truly separated by any road border segment
+  return areObjectsTrulySeparatedByRoadBorder(ego_point, object_center, road_borders);
+}
+
+// Filter objects to include only the ones that satisfy our conditions
+autoware_perception_msgs::msg::PredictedObjects filterRelevantObjects(
+  const autoware_perception_msgs::msg::PredictedObjects& objects,
+  const geometry_msgs::msg::Pose& ego_pose,
+  const SegmentRtree& road_borders)
+{
+  autoware_perception_msgs::msg::PredictedObjects filtered_objects;
+  filtered_objects.header = objects.header;
+  
+  for (const auto& object : objects.objects) {
+    // Include object if it's not a specific vehicle type or if it's not separated by road borders
+    const auto& classification = object.classification;
+    
+    bool is_large_vehicle = false;
+    for (const auto& obj_class : classification) {
+      // Check for BUS, TRUCK, and TRAILER classifications
+      if (obj_class.label == 5 || // BUS is typically 5
+          obj_class.label == 6 || // TRUCK is typically 6
+          obj_class.label == 7) { // TRAILER is typically 7
+        is_large_vehicle = true;
+        break;
+      }
+    }
+    
+    // If it's a large vehicle, check if it's separated by road borders
+    if (!is_large_vehicle || !isVehicleSeparatedByRoadBorder(object, ego_pose, road_borders)) {
+      filtered_objects.objects.push_back(object);
+    }
+  }
+  
+  return filtered_objects;
+}
+
 lanelet::ConstLanelets getPullOverLanes(
   const RouteHandler & route_handler, const bool left_side, const double backward_distance,
   const double forward_distance)
@@ -76,11 +225,10 @@ lanelet::ConstLanelets getPullOverLanes(
   } else {
     outermost_lane = route_handler.getMostRightLanelet(closest_lane, false, true);
   }
-  if (route_handler.isShoulderLanelet(outermost_lane)) {
-    return route_handler.get_shoulder_lanelet_sequence(
-      outermost_lane, backward_distance_with_buffer, forward_distance);
-  }
-  return {outermost_lane};
+
+  constexpr bool only_route_lanes = false;
+  return route_handler.getLaneletSequence(
+    outermost_lane, backward_distance_with_buffer, forward_distance, only_route_lanes);
 }
 
 static double getOffsetToLanesBoundary(

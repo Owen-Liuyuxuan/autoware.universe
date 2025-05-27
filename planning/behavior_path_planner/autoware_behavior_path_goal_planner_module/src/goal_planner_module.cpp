@@ -772,8 +772,18 @@ void GoalPlannerModule::updateData()
   const auto dynamic_target_objects = goal_planner_utils::extract_dynamic_objects(
     *(planner_data_->dynamic_object), *(planner_data_->route_handler), parameters_,
     planner_data_->parameters.vehicle_width);
+  // Get current ego pose
+  const auto & current_pose = planner_data_->self_odometry->pose.pose;
+
+  // Get road borders with reasonable search distance (e.g., 50.0 meters)
+  const auto road_borders = goal_planner_utils::getRoadBorders(
+    *(planner_data_->route_handler), current_pose, 100.0);
+
+  // Filter objects based on road side check for large vehicles
+  const auto filtered_dynamic_objects = goal_planner_utils::filterRelevantObjects(
+    dynamic_target_objects, current_pose, road_borders);
   const auto static_target_objects = utils::path_safety_checker::filterObjectsByVelocity(
-    dynamic_target_objects, parameters_.th_moving_object_velocity);
+    filtered_dynamic_objects, parameters_.th_moving_object_velocity);
 
   path_decision_controller_.transit_state(
     pull_over_path_recv, clock_->now(), static_target_objects, dynamic_target_objects,
