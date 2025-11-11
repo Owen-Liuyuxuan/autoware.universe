@@ -6,7 +6,7 @@
 
 ## Features
 
-- **Generic**: Accepts standard `Float64Stamped` messages as input
+- **Generic**: Accepts `tier4_debug_msgs::msg::Float64Stamped` messages as input
 - **Automatic Calibration**: Uses Recursive Least Squares (RLS) algorithm to automatically update velocity-acceleration mapping
 - **Data Filtering**: Automatically filters invalid data (large steering angles, pitch angles, jerk, etc.)
 - **Delay Compensation**: Accounts for delay between input value and actual acceleration
@@ -20,16 +20,16 @@
 |------------|--------------|-------------|
 | `~/input/velocity` | `autoware_vehicle_msgs::msg::VelocityReport` | Vehicle velocity information |
 | `~/input/steer` | `autoware_vehicle_msgs::msg::SteeringReport` | Steering angle information |
-| `~/input/value` | `std_msgs::msg::Float64Stamped` | Generic float64 input value |
+| `~/input/value` | `tier4_debug_msgs::msg::Float64Stamped` | Generic float64 input value |
 
 ## Output Topics
 
 | Topic Name | Message Type | Description |
 |------------|--------------|-------------|
 | `~/output/update_suggest` | `std_msgs::msg::Bool` | Flag suggesting map update |
-| `~/output/current_map_error` | `std_msgs::msg::Float64Stamped` | Current map error |
-| `~/output/updated_map_error` | `std_msgs::msg::Float64Stamped` | Updated map error |
-| `~/output/map_error_ratio` | `std_msgs::msg::Float64Stamped` | Error ratio |
+| `~/output/current_map_error` | `tier4_debug_msgs::msg::Float64Stamped` | Current map error |
+| `~/output/updated_map_error` | `tier4_debug_msgs::msg::Float64Stamped` | Updated map error |
+| `~/output/map_error_ratio` | `tier4_debug_msgs::msg::Float64Stamped` | Error ratio |
 
 ## Parameters
 

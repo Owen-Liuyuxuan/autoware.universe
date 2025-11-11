@@ -6,7 +6,7 @@
 
 ## Features
 
-- **Generic**: Outputs standard `Float64Stamped` messages
+- **Generic**: Outputs `tier4_debug_msgs::msg::Float64Stamped` messages
 - **Bilinear Interpolation**: Uses velocity and acceleration for table lookup to obtain output values
 - **CSV Loading**: Loads mapping table from CSV file
 - **Real-time Conversion**: Receives control commands and converts them to output values in real-time
@@ -23,7 +23,7 @@
 
 | Topic Name | Message Type | Description |
 |------------|--------------|-------------|
-| `~/output/value` | `std_msgs::msg::Float64Stamped` | Converted float64 output value |
+| `~/output/value` | `tier4_debug_msgs::msg::Float64Stamped` | Converted float64 output value |
 
 ## Parameters
 
@@ -105,7 +105,7 @@ ros2 launch autoware_generic_value_converter generic_value_converter.launch.xml 
 ```python
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float64Stamped
+from tier4_debug_msgs.msg import Float64Stamped
 
 class ValueSubscriber(Node):
     def __init__(self):
