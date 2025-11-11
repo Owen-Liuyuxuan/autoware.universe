@@ -23,12 +23,11 @@
 
 #include <rclcpp/rclcpp.hpp>
 
-#include "autoware_generic_value_converter/msg/float64_stamped.hpp"
-
 #include <autoware_control_msgs/msg/control.hpp>
 #include <autoware_vehicle_msgs/msg/velocity_report.hpp>
 #include <geometry_msgs/msg/twist_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
+#include <tier4_debug_msgs/msg/float64_stamped.hpp>
 
 #include <memory>
 #include <string>
@@ -36,7 +35,7 @@
 namespace autoware::generic_value_converter
 {
 using Control = autoware_control_msgs::msg::Control;
-using Float64Stamped = autoware_generic_value_converter::msg::Float64Stamped;
+using tier4_debug_msgs::msg::Float64Stamped;
 using TwistStamped = geometry_msgs::msg::TwistStamped;
 using Odometry = nav_msgs::msg::Odometry;
 using VelocityReport = autoware_vehicle_msgs::msg::VelocityReport;

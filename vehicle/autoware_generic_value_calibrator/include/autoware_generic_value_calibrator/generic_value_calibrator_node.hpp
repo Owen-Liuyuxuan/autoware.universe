@@ -25,11 +25,11 @@
 
 #include <Eigen/Dense>
 
-#include "autoware_generic_value_calibrator/msg/float64_stamped.hpp"
 #include "autoware_vehicle_msgs/msg/steering_report.hpp"
 #include "autoware_vehicle_msgs/msg/velocity_report.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include "tier4_debug_msgs/msg/float64_stamped.hpp"
 
 #include <cstdio>
 #include <fstream>
@@ -43,7 +43,7 @@ namespace autoware::generic_value_calibrator
 {
 using autoware_vehicle_msgs::msg::SteeringReport;
 using autoware_vehicle_msgs::msg::VelocityReport;
-using Float64Stamped = autoware_generic_value_calibrator::msg::Float64Stamped;
+using tier4_debug_msgs::msg::Float64Stamped;
 using geometry_msgs::msg::TwistStamped;
 
 using Map = std::vector<std::vector<double>>;
