@@ -235,7 +235,8 @@ void GenericValueCalibrator::fetch_data()
   // data check - timeout
   if (
     is_timeout(twist_ptr_->header.stamp, timeout_sec_) ||
-    is_timeout(steer_ptr_->stamp, timeout_sec_) || is_timeout(input_value_ptr_, timeout_sec_)) {
+    is_timeout(steer_ptr_->stamp, timeout_sec_) || 
+    is_timeout(input_value_ptr_, timeout_sec_)) {
     RCLCPP_WARN_STREAM_THROTTLE(
       get_logger(), *get_clock(), 5000, "timeout of topics (twist, steer, input_value)");
     lack_of_data_count_++;
@@ -355,7 +356,7 @@ void GenericValueCalibrator::take_velocity(const VelocityReport::ConstSharedPtr 
 
 void GenericValueCalibrator::take_input_value(const Float64Stamped::ConstSharedPtr msg)
 {
-  input_value_ptr_ = std::make_shared<DataStamped>(msg->data, rclcpp::Time(msg->header.stamp));
+  input_value_ptr_ = std::make_shared<DataStamped>(msg->data, rclcpp::Time(msg->stamp));
   
   if (!input_value_vec_.empty()) {
     const auto past_value_ptr =
@@ -687,7 +688,7 @@ void GenericValueCalibrator::check_update_suggest(
 void GenericValueCalibrator::publish_float64(const std::string & publish_type, const double val)
 {
   Float64Stamped msg;
-  msg.header.stamp = this->now();
+  msg.stamp = this->now();
   msg.data = val;
   
   if (publish_type == "current_map_error") {

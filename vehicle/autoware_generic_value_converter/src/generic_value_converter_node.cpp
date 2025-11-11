@@ -117,8 +117,7 @@ void GenericValueConverterNode::publishOutputValue()
 
   // Publish output
   Float64Stamped output_msg;
-  output_msg.header.stamp = this->now();
-  output_msg.header.frame_id = "base_link";
+  output_msg.stamp = this->now();
   output_msg.data = output_value;
 
   pub_output_value_->publish(output_msg);
