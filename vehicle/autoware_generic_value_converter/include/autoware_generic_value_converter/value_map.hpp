@@ -41,7 +41,7 @@ public:
 private:
   rclcpp::Logger logger_{
     rclcpp::get_logger("autoware_generic_value_converter").get_child("value_map")};
-  rclcpp::Clock clock_{RCL_ROS_TIME};
+  mutable rclcpp::Clock clock_{RCL_ROS_TIME};
   std::string vehicle_name_;
   std::vector<double> vel_index_;
   std::vector<double> value_index_;

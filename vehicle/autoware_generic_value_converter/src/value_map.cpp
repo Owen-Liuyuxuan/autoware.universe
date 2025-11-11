@@ -24,7 +24,8 @@
 namespace autoware::generic_value_converter
 {
 
-bool ValueMap::readValueMapFromCSV(const std::string & csv_path, const bool validation)
+bool ValueMap::readValueMapFromCSV(
+  const std::string & csv_path, [[maybe_unused]] const bool validation)
 {
   CSVLoader csv(csv_path);
   std::vector<std::vector<std::string>> table;
