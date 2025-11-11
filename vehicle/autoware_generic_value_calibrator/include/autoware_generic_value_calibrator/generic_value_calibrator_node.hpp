@@ -234,6 +234,7 @@ private:
 
 public:
   explicit GenericValueCalibrator(const rclcpp::NodeOptions & node_options);
+  ~GenericValueCalibrator();
 };
 
 }  // namespace autoware::generic_value_calibrator

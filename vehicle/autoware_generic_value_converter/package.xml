@@ -8,12 +8,14 @@
     using velocity-acceleration mapping, similar to raw_vehicle_cmd_converter but
     works with arbitrary float64 outputs.
   </description>
-  <maintainer email="maintainer@example.com">Autoware</maintainer>
+  <maintainer email="tier4@example.com">Tier IV</maintainer>
   <license>Apache License 2.0</license>
 
   <buildtool_depend>ament_cmake_auto</buildtool_depend>
 
+  <depend>autoware_interpolation</depend>
   <depend>autoware_utils</depend>
+  <depend>nav_msgs</depend>
   <depend>rclcpp</depend>
   <depend>rclcpp_components</depend>
   <depend>std_msgs</depend>

@@ -38,7 +38,13 @@ bool ValueMap::readValueMapFromCSV(const std::string & csv_path, const bool vali
   value_index_ = CSVLoader::getRowIndex(table);
   value_map_ = CSVLoader::getMap(table);
   
-  return !validation || CSVLoader::validateMap(value_map_, true);
+  // Always validate the map to ensure integrity
+  if (!CSVLoader::validateMap(value_map_, true)) {
+    RCLCPP_ERROR(logger_, "Value map validation failed for: %s", csv_path.c_str());
+    return false;
+  }
+  
+  return true;
 }
 
 bool ValueMap::getValue(const double acc, double vel, double & value) const

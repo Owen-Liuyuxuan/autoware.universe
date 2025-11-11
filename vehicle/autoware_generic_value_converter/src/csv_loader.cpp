@@ -17,6 +17,7 @@
 #include "autoware_generic_value_converter/csv_loader.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 #include <string>
@@ -90,19 +91,30 @@ std::vector<std::vector<double>> CSVLoader::getMap(
 bool CSVLoader::validateMap(
   const std::vector<std::vector<double>> & map, [[maybe_unused]] bool is_col_decent)
 {
-  // Check if map is rectangular
+  // Check if map is empty
   if (map.empty()) {
     return false;
   }
 
+  // Check if map is rectangular (all rows have same number of columns)
   const std::size_t cols = map[0].size();
+  if (cols == 0) {
+    return false;
+  }
+
   for (const auto & row : map) {
     if (row.size() != cols) {
       return false;
     }
+    
+    // Check for NaN or Inf values
+    for (const auto & val : row) {
+      if (std::isnan(val) || std::isinf(val)) {
+        return false;
+      }
+    }
   }
 
-  // Additional validation can be added here
   return true;
 }
 

@@ -34,8 +34,6 @@ namespace autoware::generic_value_calibrator
 GenericValueCalibrator::GenericValueCalibrator(const rclcpp::NodeOptions & node_options)
 : Node("generic_value_calibrator", node_options)
 {
-  transform_listener_ = std::make_shared<autoware_utils::TransformListener>(this);
-  
   // get parameter
   update_hz_ = declare_parameter<double>("update_hz", 10.0);
   covariance_ = declare_parameter<double>("initial_covariance", 0.05);
@@ -56,6 +54,8 @@ GenericValueCalibrator::GenericValueCalibrator(const rclcpp::NodeOptions & node_
   const auto get_pitch_method_str = declare_parameter("get_pitch_method", std::string("tf"));
   if (get_pitch_method_str == std::string("tf")) {
     get_pitch_method_ = GET_PITCH_METHOD::TF;
+    // Only initialize transform_listener when needed
+    transform_listener_ = std::make_shared<autoware_utils::TransformListener>(this);
   } else if (get_pitch_method_str == std::string("none")) {
     get_pitch_method_ = GET_PITCH_METHOD::NONE;
   } else {
@@ -140,7 +140,12 @@ GenericValueCalibrator::GenericValueCalibrator(const rclcpp::NodeOptions & node_
   std::string output_log_file = declare_parameter("output_log_file", std::string(""));
   if (!output_log_file.empty()) {
     output_log_.open(output_log_file);
-    add_index_to_csv(&output_log_);
+    if (output_log_.is_open()) {
+      add_index_to_csv(&output_log_);
+      RCLCPP_INFO(get_logger(), "Logging calibration data to: %s", output_log_file.c_str());
+    } else {
+      RCLCPP_WARN(get_logger(), "Failed to open log file: %s", output_log_file.c_str());
+    }
   }
 
   // timer
@@ -242,6 +247,23 @@ void GenericValueCalibrator::fetch_data()
     RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000, "cannot get pitch");
     failed_to_get_pitch_count_++;
     return;
+  }
+
+  /* write data to log if enabled */
+  if (output_log_.is_open() && delayed_input_value_ptr_) {
+    output_log_ << rclcpp::Time(twist_ptr_->header.stamp).seconds() << ","
+                << twist_ptr_->twist.linear.x << ","
+                << acceleration_ << ","
+                << get_pitch_compensated_acceleration() << ","
+                << delayed_input_value_ptr_->data << ","
+                << input_value_speed_ << ","
+                << pitch_ << ","
+                << steer_ptr_->steering_tire_angle << ","
+                << jerk_ << ","
+                << part_original_rmse_ << ","
+                << new_rmse_ << ","
+                << (part_original_rmse_ != 0.0 ? new_rmse_ / part_original_rmse_ : 1.0)
+                << std::endl;
   }
 
   /* publish error metrics */
@@ -740,6 +762,15 @@ void GenericValueCalibrator::add_index_to_csv(std::ofstream * csv_file)
   *csv_file << "timestamp,velocity,accel,pitch_comp_accel,input_value,input_value_speed,"
             << "pitch,steer,jerk,part_original_rmse,new_rmse,rmse_rate"
             << std::endl;
+}
+
+// Destructor to ensure log file is properly closed
+GenericValueCalibrator::~GenericValueCalibrator()
+{
+  if (output_log_.is_open()) {
+    output_log_.close();
+    RCLCPP_INFO(get_logger(), "Calibration log file closed");
+  }
 }
 
 }  // namespace autoware::generic_value_calibrator
