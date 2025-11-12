@@ -691,6 +691,8 @@ void GenericValueCalibrator::execute_update(const int value_index, const int vel
     update_each_val_offset(value_index, vel_index, measured_acc, map_acc);
   } else if (update_method_ == UPDATE_METHOD::UPDATE_OFFSET_TOTAL) {
     update_total_map_offset(measured_acc, map_acc);
+    // Still update statistics for the current cell to track data coverage
+    update_statistics(value_index, vel_index, measured_acc);
   }
 }
 
@@ -716,6 +718,24 @@ bool GenericValueCalibrator::update_each_val_offset(
 
   const double error_map_offset = measured_acc - map_acc;
   map_offset = map_offset + coef * error_map_offset;
+
+  /* Update statistics using Welford's online algorithm */
+  const double current_count = data_num_(value_index, vel_index);
+  const double pre_mean = data_mean_mat_(value_index, vel_index);
+  const double pre_variance = data_covariance_mat_(value_index, vel_index);
+  
+  // Update mean
+  const double new_mean = (current_count * pre_mean + measured_acc) / (current_count + 1);
+  
+  // Update variance using Welford's method
+  const double new_variance = 
+    (current_count * (pre_variance + pre_mean * pre_mean) + measured_acc * measured_acc) / 
+    (current_count + 1) - new_mean * new_mean;
+  
+  // Update count
+  data_num_(value_index, vel_index) = current_count + 1;
+  data_mean_mat_(value_index, vel_index) = new_mean;
+  data_covariance_mat_(value_index, vel_index) = new_variance;
 
   /* update map */
   map_offset_vec.at(value_index).at(vel_index) = map_offset;
@@ -746,6 +766,28 @@ void GenericValueCalibrator::update_total_map_offset(
         value_map_.at(val_idx).at(vel_idx) + map_offset_;
     }
   }
+}
+
+void GenericValueCalibrator::update_statistics(
+  const int value_index, const int vel_index, const double measured_acc)
+{
+  /* Update statistics using Welford's online algorithm */
+  const double current_count = data_num_(value_index, vel_index);
+  const double pre_mean = data_mean_mat_(value_index, vel_index);
+  const double pre_variance = data_covariance_mat_(value_index, vel_index);
+  
+  // Update mean
+  const double new_mean = (current_count * pre_mean + measured_acc) / (current_count + 1);
+  
+  // Update variance using Welford's method
+  const double new_variance = 
+    (current_count * (pre_variance + pre_mean * pre_mean) + measured_acc * measured_acc) / 
+    (current_count + 1) - new_mean * new_mean;
+  
+  // Update count
+  data_num_(value_index, vel_index) = current_count + 1;
+  data_mean_mat_(value_index, vel_index) = new_mean;
+  data_covariance_mat_(value_index, vel_index) = new_variance;
 }
 
 double GenericValueCalibrator::get_pitch_compensated_acceleration() const

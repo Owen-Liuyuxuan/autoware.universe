@@ -199,6 +199,7 @@ private:
   bool update_each_val_offset(
     const int value_index, const int vel_index, const double measured_acc, const double map_acc);
   void update_total_map_offset(const double measured_acc, const double map_acc);
+  void update_statistics(const int value_index, const int vel_index, const double measured_acc);
 
   void take_input_value(const Float64Stamped::ConstSharedPtr msg);
   void take_velocity(const VelocityReport::ConstSharedPtr msg);
