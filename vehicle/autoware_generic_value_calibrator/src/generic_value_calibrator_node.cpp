@@ -34,6 +34,8 @@ namespace autoware::generic_value_calibrator
 GenericValueCalibrator::GenericValueCalibrator(const rclcpp::NodeOptions & node_options)
 : Node("generic_value_calibrator", node_options)
 {
+  RCLCPP_INFO(get_logger(), "=== Generic Value Calibrator Initializing ===");
+  
   // get parameter
   update_hz_ = declare_parameter<double>("update_hz", 10.0);
   covariance_ = declare_parameter<double>("initial_covariance", 0.05);
@@ -167,7 +169,25 @@ GenericValueCalibrator::GenericValueCalibrator(const rclcpp::NodeOptions & node_
 
   logger_configure_ = std::make_unique<autoware_utils::LoggerLevelConfigure>(this);
   
-  RCLCPP_INFO(get_logger(), "GenericValueCalibrator initialized successfully");
+  // Print important parameters
+  RCLCPP_INFO(get_logger(), "=== Calibration Parameters ===");
+  RCLCPP_INFO(get_logger(), "  Update Hz: %.1f", update_hz_);
+  RCLCPP_INFO(get_logger(), "  Velocity min threshold: %.3f m/s", velocity_min_threshold_);
+  RCLCPP_INFO(get_logger(), "  Max steer threshold: %.3f rad", max_steer_threshold_);
+  RCLCPP_INFO(get_logger(), "  Max pitch threshold: %.3f rad", max_pitch_threshold_);
+  RCLCPP_INFO(get_logger(), "  Max jerk threshold: %.3f m/s^3", max_jerk_threshold_);
+  RCLCPP_INFO(get_logger(), "  Value to accel delay: %.3f s", value_to_accel_delay_);
+  RCLCPP_INFO(get_logger(), "=== Subscribed Topics ===");
+  RCLCPP_INFO(get_logger(), "  Input value: ~/input/value (Float64Stamped)");
+  RCLCPP_INFO(get_logger(), "  Velocity: ~/input/velocity (VelocityReport)");
+  RCLCPP_INFO(get_logger(), "  Steering: ~/input/steer (SteeringReport)");
+  RCLCPP_INFO(get_logger(), "=== Output ===");
+  RCLCPP_INFO(get_logger(), "  Map file: %s", output_map_file_.c_str());
+  if (!output_log_file.empty()) {
+    RCLCPP_INFO(get_logger(), "  Log file: %s", output_log_file.c_str());
+  }
+  RCLCPP_INFO(get_logger(), "=== GenericValueCalibrator Ready! ===");
+  RCLCPP_INFO(get_logger(), "Waiting for input topics...");
 }
 
 void GenericValueCalibrator::init_output_csv_timer(double period_s)
@@ -213,24 +233,46 @@ bool GenericValueCalibrator::take_data()
 {
   // take input value data
   Float64Stamped::ConstSharedPtr input_value_msg = input_value_sub_.take_data();
-  if (!input_value_msg) return false;
+  if (!input_value_msg) {
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 10000, 
+      "No input_value message received. Topic: ~/input/value");
+    return false;
+  }
   take_input_value(input_value_msg);
 
   // take velocity data
   VelocityReport::ConstSharedPtr velocity_ptr = velocity_sub_.take_data();
-  if (!velocity_ptr) return false;
+  if (!velocity_ptr) {
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 10000, 
+      "No velocity message received. Topic: ~/input/velocity");
+    return false;
+  }
   take_velocity(velocity_ptr);
 
   // take steer data
   steer_ptr_ = steer_sub_.take_data();
+  if (!steer_ptr_) {
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 10000, 
+      "No steer message received. Topic: ~/input/steer");
+  }
 
   /* valid check */
   if (!twist_ptr_ || !steer_ptr_ || !input_value_ptr_ || !delayed_input_value_ptr_) {
-    RCLCPP_WARN_STREAM_THROTTLE(
-      get_logger(), *get_clock(), 5000, "lack of topics (twist, steer, input_value)");
+    std::stringstream ss;
+    ss << "Lack of required data - ";
+    if (!twist_ptr_) ss << "twist ";
+    if (!steer_ptr_) ss << "steer ";
+    if (!input_value_ptr_) ss << "input_value ";
+    if (!delayed_input_value_ptr_) ss << "delayed_input_value ";
+    RCLCPP_WARN_STREAM_THROTTLE(get_logger(), *get_clock(), 5000, ss.str());
     lack_of_data_count_++;
     return false;
   }
+  
+  RCLCPP_DEBUG_THROTTLE(get_logger(), *get_clock(), 30000, "All data successfully received");
   return true;
 }
 
@@ -293,6 +335,10 @@ void GenericValueCalibrator::fetch_data()
 
   // velocity check
   if (twist_ptr_->twist.linear.x < velocity_min_threshold_) {
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 10000,
+      "Velocity too low: %.3f < %.3f m/s", 
+      twist_ptr_->twist.linear.x, velocity_min_threshold_);
     too_low_speed_count_++;
     return;
   }
@@ -302,34 +348,63 @@ void GenericValueCalibrator::fetch_data()
 
   // pitch check
   if (std::fabs(pitch_) > max_pitch_threshold_) {
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 10000,
+      "Pitch too large: %.3f > %.3f rad", 
+      std::fabs(pitch_), max_pitch_threshold_);
     too_large_pitch_count_++;
     return;
   }
 
   // steer check
   if (std::fabs(steer_ptr_->steering_tire_angle) > max_steer_threshold_) {
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 10000,
+      "Steering angle too large: %.3f > %.3f rad", 
+      std::fabs(steer_ptr_->steering_tire_angle), max_steer_threshold_);
     too_large_steer_count_++;
     return;
   }
 
   // jerk check
   if (std::fabs(jerk_) > max_jerk_threshold_) {
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 10000,
+      "Jerk too large: %.3f > %.3f m/s^3", 
+      std::fabs(jerk_), max_jerk_threshold_);
     too_large_jerk_count_++;
     return;
   }
 
   // value speed check
   if (std::fabs(input_value_speed_) > value_velocity_thresh_) {
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 10000,
+      "Input value speed too large: %.3f > %.3f", 
+      std::fabs(input_value_speed_), value_velocity_thresh_);
     too_large_value_spd_count_++;
     return;
   }
+
+  RCLCPP_DEBUG_THROTTLE(
+    get_logger(), *get_clock(), 5000,
+    "All checks passed! Attempting map update with vel=%.3f m/s, value=%.3f, accel=%.3f m/s^2",
+    twist_ptr_->twist.linear.x, delayed_input_value_ptr_->data, get_pitch_compensated_acceleration());
 
   /* update map */
   if (update_value_map()) {
     update_success_count_++;
     update_success_ = true;
+    RCLCPP_INFO_THROTTLE(
+      get_logger(), *get_clock(), 2000,
+      "✓ Map update SUCCESS! Total: %d/%d (%.1f%%)",
+      update_success_count_, update_count_, 
+      100.0 * update_success_count_ / std::max(1, update_count_));
   } else {
     update_fail_count_++;
+    RCLCPP_DEBUG_THROTTLE(
+      get_logger(), *get_clock(), 10000,
+      "Map update failed (cell might be out of bounds)");
   }
 }
 
