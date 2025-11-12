@@ -413,7 +413,7 @@ void GenericValueCalibrator::timer_callback_output_csv()
   write_map_to_csv(vel_index_, value_index_, update_value_map_, output_map_file_);
   
   // Publish visualization data
-  publish_map(default_value_map_, "original");
+  publish_map(value_map_, "original");  // value_map_ is the default/original map
   publish_map(update_value_map_, "update");
   publish_count_map();
   publish_index();
@@ -944,11 +944,11 @@ void GenericValueCalibrator::publish_count_map()
   const double h = static_cast<double>(value_map_.size());
   const double w = static_cast<double>(value_map_.at(0).size());
 
-  // Publish average map
+  // Publish average map (using data_mean_mat_)
   std::vector<int8_t> average_map(static_cast<std::size_t>(h * w), 0);
   for (int i = 0; i < h; i++) {
     for (int j = 0; j < w; j++) {
-      const double value = data_ave_.at(i).at(j);
+      const double value = data_mean_mat_(i, j);  // Use Eigen matrix accessor
       int8_t int_value = static_cast<int8_t>(100 * ((value - min_accel_) / (max_accel_ - min_accel_)));
       average_map.at(static_cast<std::size_t>(i * w + j)) =
         std::max(std::min(static_cast<int8_t>(100), int_value), static_cast<int8_t>(0));
@@ -956,12 +956,13 @@ void GenericValueCalibrator::publish_count_map()
   }
   data_ave_pub_->publish(get_occ_msg("base_link", h, w, 0.1, average_map));
 
-  // Publish std dev map
+  // Publish std dev map (computed from covariance)
   std::vector<int8_t> std_map(static_cast<std::size_t>(h * w), 0);
   for (int i = 0; i < h; i++) {
     for (int j = 0; j < w; j++) {
-      const double value = data_std_.at(i).at(j);
-      int8_t int_value = static_cast<int8_t>(100 * value / 5.0);  // Scale stddev, max expected ~5 m/s^2
+      const double variance = data_covariance_mat_(i, j);
+      const double std_dev = std::sqrt(std::max(0.0, variance));  // Ensure non-negative
+      int8_t int_value = static_cast<int8_t>(100 * std_dev / 5.0);  // Scale stddev, max expected ~5 m/s^2
       std_map.at(static_cast<std::size_t>(i * w + j)) =
         std::max(std::min(static_cast<int8_t>(100), int_value), static_cast<int8_t>(0));
     }
@@ -972,7 +973,7 @@ void GenericValueCalibrator::publish_count_map()
   std::vector<int8_t> count_map(static_cast<std::size_t>(h * w), 0);
   for (int i = 0; i < h; i++) {
     for (int j = 0; j < w; j++) {
-      const double count = data_num_.at(i).at(j);
+      const double count = data_num_(i, j);  // Use Eigen matrix accessor
       int8_t int_value = static_cast<int8_t>(std::min(count, 100.0));  // Cap at 100
       count_map.at(static_cast<std::size_t>(i * w + j)) = int_value;
     }
@@ -982,8 +983,8 @@ void GenericValueCalibrator::publish_count_map()
   // Publish count map with self pose
   int nearest_value_idx = nearest_value_index_search();
   int nearest_vel_idx = 0;
-  if (!vel_index_.empty() && velocity_ptr_) {
-    nearest_vel_idx = nearest_value_search(vel_index_, velocity_ptr_->longitudinal_velocity);
+  if (!vel_index_.empty() && twist_ptr_) {  // Use twist_ptr_ instead of velocity_ptr_
+    nearest_vel_idx = nearest_value_search(vel_index_, twist_ptr_->twist.linear.x);
   }
 
   // Mark current position
