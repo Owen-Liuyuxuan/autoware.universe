@@ -135,6 +135,19 @@ GenericValueCalibrator::GenericValueCalibrator(const rclcpp::NodeOptions & node_
   updated_map_error_pub_ =
     create_publisher<Float64Stamped>("~/output/updated_map_error", durable_qos);
   map_error_ratio_pub_ = create_publisher<Float64Stamped>("~/output/map_error_ratio", durable_qos);
+  
+  // Debug/Visualization publishers
+  original_map_occ_pub_ = create_publisher<OccupancyGrid>("~/debug/original_occ_map", durable_qos);
+  update_map_occ_pub_ = create_publisher<OccupancyGrid>("~/debug/update_occ_map", durable_qos);
+  data_ave_pub_ = create_publisher<OccupancyGrid>("~/debug/data_average_occ_map", durable_qos);
+  data_std_pub_ = create_publisher<OccupancyGrid>("~/debug/data_std_dev_occ_map", durable_qos);
+  data_count_pub_ = create_publisher<OccupancyGrid>("~/debug/data_count_occ_map", durable_qos);
+  data_count_with_self_pose_pub_ =
+    create_publisher<OccupancyGrid>("~/debug/data_count_self_pose_occ_map", durable_qos);
+  index_pub_ = create_publisher<MarkerArray>("~/debug/occ_index", durable_qos);
+  original_map_raw_pub_ =
+    create_publisher<Float32MultiArray>("~/debug/original_raw_map", durable_qos);
+  update_map_raw_pub_ = create_publisher<Float32MultiArray>("~/output/update_raw_map", durable_qos);
 
   // output log file
   std::string output_log_file = declare_parameter("output_log_file", std::string(""));
@@ -323,6 +336,12 @@ void GenericValueCalibrator::fetch_data()
 void GenericValueCalibrator::timer_callback_output_csv()
 {
   write_map_to_csv(vel_index_, value_index_, update_value_map_, output_map_file_);
+  
+  // Publish visualization data
+  publish_map(default_value_map_, "original");
+  publish_map(update_value_map_, "update");
+  publish_count_map();
+  publish_index();
 }
 
 void GenericValueCalibrator::take_velocity(const VelocityReport::ConstSharedPtr msg)
@@ -763,6 +782,228 @@ void GenericValueCalibrator::add_index_to_csv(std::ofstream * csv_file)
   *csv_file << "timestamp,velocity,accel,pitch_comp_accel,input_value,input_value_speed,"
             << "pitch,steer,jerk,part_original_rmse,new_rmse,rmse_rate"
             << std::endl;
+}
+
+/* Debug/Visualization Functions */
+
+OccupancyGrid GenericValueCalibrator::get_occ_msg(
+  const std::string & frame_id, const double height, const double width, const double resolution,
+  const std::vector<int8_t> & map_value)
+{
+  OccupancyGrid occ;
+  occ.header.frame_id = frame_id;
+  occ.header.stamp = this->now();
+  occ.info.height = static_cast<uint32_t>(height);
+  occ.info.width = static_cast<uint32_t>(width);
+  occ.info.map_load_time = this->now();
+  occ.info.origin.position.x = 0;
+  occ.info.origin.position.y = 0;
+  occ.info.origin.position.z = 0;
+  occ.info.origin.orientation.x = 0;
+  occ.info.origin.orientation.y = 0;
+  occ.info.origin.orientation.z = 0;
+  occ.info.origin.orientation.w = 1;
+  occ.info.resolution = static_cast<float>(resolution);
+  occ.data = map_value;
+  return occ;
+}
+
+void GenericValueCalibrator::publish_map(
+  const Map & value_map, const std::string & publish_type)
+{
+  const double h = static_cast<double>(value_map.size());    // value index size
+  const double w = static_cast<double>(value_map.at(0).size());  // velocity index size
+
+  // Publish occupancy map
+  const int8_t max_occ_value = 100;
+  std::vector<int8_t> int_map_value;
+  int_map_value.resize(static_cast<std::size_t>(h * w));
+  
+  for (int i = 0; i < h; i++) {
+    for (int j = 0; j < w; j++) {
+      const double value = value_map.at(i).at(j);
+      // Convert value to 0~100 int value
+      int8_t int_value =
+        static_cast<int8_t>(max_occ_value * ((value - min_accel_) / (max_accel_ - min_accel_)));
+      int_map_value.at(static_cast<std::size_t>(i * w + j)) =
+        std::max(std::min(max_occ_value, int_value), static_cast<int8_t>(0));
+    }
+  }
+
+  const double resolution = 0.1;  // meters per cell
+  if (publish_type == "original") {
+    original_map_occ_pub_->publish(get_occ_msg("base_link", h, w, resolution, int_map_value));
+  } else {
+    update_map_occ_pub_->publish(get_occ_msg("base_link", h, w, resolution, int_map_value));
+  }
+
+  // Publish raw map
+  Float32MultiArray float_map;
+  float_map.layout.dim.push_back(std_msgs::msg::MultiArrayDimension());
+  float_map.layout.dim.push_back(std_msgs::msg::MultiArrayDimension());
+  float_map.layout.dim[0].label = "height";
+  float_map.layout.dim[1].label = "width";
+  float_map.layout.dim[0].size = static_cast<uint32_t>(h);
+  float_map.layout.dim[1].size = static_cast<uint32_t>(w);
+  float_map.layout.dim[0].stride = static_cast<uint32_t>(h * w);
+  float_map.layout.dim[1].stride = static_cast<uint32_t>(w);
+  float_map.layout.data_offset = 0;
+  
+  std::vector<float> vec(static_cast<std::size_t>(h * w), 0);
+  for (int i = 0; i < h; i++) {
+    for (int j = 0; j < w; j++) {
+      vec[i * w + j] = static_cast<float>(value_map.at(i).at(j));
+    }
+  }
+  float_map.data = vec;
+
+  if (publish_type == "original") {
+    original_map_raw_pub_->publish(float_map);
+  } else {
+    update_map_raw_pub_->publish(float_map);
+  }
+}
+
+void GenericValueCalibrator::publish_count_map()
+{
+  const double h = static_cast<double>(value_map_.size());
+  const double w = static_cast<double>(value_map_.at(0).size());
+
+  // Publish average map
+  std::vector<int8_t> average_map(static_cast<std::size_t>(h * w), 0);
+  for (int i = 0; i < h; i++) {
+    for (int j = 0; j < w; j++) {
+      const double value = data_ave_.at(i).at(j);
+      int8_t int_value = static_cast<int8_t>(100 * ((value - min_accel_) / (max_accel_ - min_accel_)));
+      average_map.at(static_cast<std::size_t>(i * w + j)) =
+        std::max(std::min(static_cast<int8_t>(100), int_value), static_cast<int8_t>(0));
+    }
+  }
+  data_ave_pub_->publish(get_occ_msg("base_link", h, w, 0.1, average_map));
+
+  // Publish std dev map
+  std::vector<int8_t> std_map(static_cast<std::size_t>(h * w), 0);
+  for (int i = 0; i < h; i++) {
+    for (int j = 0; j < w; j++) {
+      const double value = data_std_.at(i).at(j);
+      int8_t int_value = static_cast<int8_t>(100 * value / 5.0);  // Scale stddev, max expected ~5 m/s^2
+      std_map.at(static_cast<std::size_t>(i * w + j)) =
+        std::max(std::min(static_cast<int8_t>(100), int_value), static_cast<int8_t>(0));
+    }
+  }
+  data_std_pub_->publish(get_occ_msg("base_link", h, w, 0.1, std_map));
+
+  // Publish count map
+  std::vector<int8_t> count_map(static_cast<std::size_t>(h * w), 0);
+  for (int i = 0; i < h; i++) {
+    for (int j = 0; j < w; j++) {
+      const double count = data_num_.at(i).at(j);
+      int8_t int_value = static_cast<int8_t>(std::min(count, 100.0));  // Cap at 100
+      count_map.at(static_cast<std::size_t>(i * w + j)) = int_value;
+    }
+  }
+  data_count_pub_->publish(get_occ_msg("base_link", h, w, 0.1, count_map));
+
+  // Publish count map with self pose
+  int nearest_value_idx = nearest_value_index_search();
+  int nearest_vel_idx = 0;
+  if (!vel_index_.empty() && velocity_ptr_) {
+    nearest_vel_idx = nearest_value_search(vel_index_, velocity_ptr_->longitudinal_velocity);
+  }
+
+  // Mark current position
+  std::vector<int8_t> count_with_self_pose = count_map;
+  if (nearest_value_idx >= 0 && nearest_value_idx < h &&
+      nearest_vel_idx >= 0 && nearest_vel_idx < w) {
+    count_with_self_pose.at(static_cast<std::size_t>(nearest_value_idx * w + nearest_vel_idx)) =
+      update_success_ ? std::numeric_limits<int8_t>::max() : std::numeric_limits<int8_t>::min();
+  }
+  data_count_with_self_pose_pub_->publish(get_occ_msg("base_link", h, w, 0.1, count_with_self_pose));
+}
+
+int GenericValueCalibrator::nearest_value_index_search() const
+{
+  if (!delayed_input_value_ptr_ || value_index_.empty()) {
+    return 0;
+  }
+  return nearest_value_search(value_index_, delayed_input_value_ptr_->data);
+}
+
+void GenericValueCalibrator::publish_index()
+{
+  MarkerArray markers;
+  const double h = static_cast<double>(value_map_.size());
+  const double w = static_cast<double>(value_map_.at(0).size());
+  const double resolution = 0.1;
+
+  visualization_msgs::msg::Marker marker;
+  marker.header.frame_id = "base_link";
+  marker.header.stamp = this->now();
+  marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+  marker.action = visualization_msgs::msg::Marker::ADD;
+  
+  std_msgs::msg::ColorRGBA color;
+  color.a = 0.999;
+  color.b = 0.1;
+  color.g = 0.1;
+  color.r = 0.1;
+  marker.color = color;
+  marker.frame_locked = true;
+  marker.pose.position.z = 0.0;
+  marker.pose.orientation.x = 0.0;
+  marker.pose.orientation.y = 0.0;
+  marker.pose.orientation.z = 0.0;
+  marker.pose.orientation.w = 1.0;
+
+  // Value index labels (Y-axis)
+  for (int value_idx = 0; value_idx < h; value_idx++) {
+    const double value = value_index_.at(value_idx);
+    marker.ns = "occ_value_index";
+    marker.id = value_idx;
+    marker.pose.position.x = -resolution * 0.5;
+    marker.pose.position.y = resolution * (0.5 + value_idx);
+    marker.scale.z = 0.03;
+    
+    std::stringstream stream;
+    stream << std::fixed << std::setprecision(2) << value;
+    marker.text = stream.str();
+    markers.markers.push_back(marker);
+  }
+
+  // Value index name label
+  marker.ns = "occ_value_index";
+  marker.id = static_cast<int>(h);
+  marker.pose.position.x = -resolution * 0.5;
+  marker.pose.position.y = resolution * (0.5 + h);
+  marker.scale.z = 0.03;
+  marker.text = "(input_value)";
+  markers.markers.push_back(marker);
+
+  // Velocity index labels (X-axis)
+  for (int vel_idx = 0; vel_idx < w; vel_idx++) {
+    const double vel_value = vel_index_.at(vel_idx);
+    marker.ns = "occ_vel_index";
+    marker.id = vel_idx;
+    marker.pose.position.x = resolution * (0.5 + vel_idx);
+    marker.pose.position.y = -resolution * 0.2;
+    marker.scale.z = 0.02;
+    
+    std::stringstream stream;
+    stream << std::fixed << std::setprecision(2) << vel_value;
+    marker.text = stream.str() + "m/s";
+    markers.markers.push_back(marker);
+  }
+
+  // Velocity index name label
+  marker.ns = "occ_vel_index";
+  marker.id = static_cast<int>(w);
+  marker.pose.position.x = resolution * (0.5 + w);
+  marker.pose.position.y = -resolution * 0.2;
+  marker.scale.z = 0.02;
+  marker.text = "(velocity)";
+  markers.markers.push_back(marker);
+
+  index_pub_->publish(markers);
 }
 
 // Destructor to ensure log file is properly closed

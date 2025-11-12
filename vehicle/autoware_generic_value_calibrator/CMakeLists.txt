@@ -21,6 +21,11 @@ rclcpp_components_register_node(${PROJECT_NAME}
 
 install(PROGRAMS
   scripts/topic_converter.py
+  scripts/generic_value_map_server.py
+  scripts/calc_utils.py
+  scripts/csv_reader.py
+  scripts/plotter.py
+  scripts/config.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
@@ -29,4 +34,5 @@ ament_auto_package(
     config
     data
     launch
+    rviz
 )

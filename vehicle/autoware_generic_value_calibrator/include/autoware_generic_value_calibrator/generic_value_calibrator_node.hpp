@@ -28,8 +28,11 @@
 #include "autoware_vehicle_msgs/msg/steering_report.hpp"
 #include "autoware_vehicle_msgs/msg/velocity_report.hpp"
 #include "geometry_msgs/msg/twist_stamped.hpp"
+#include "nav_msgs/msg/occupancy_grid.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/float32_multi_array.hpp"
 #include "tier4_debug_msgs/msg/float64_stamped.hpp"
+#include "visualization_msgs/msg/marker_array.hpp"
 
 #include <cstdio>
 #include <fstream>
@@ -45,6 +48,9 @@ using autoware_vehicle_msgs::msg::SteeringReport;
 using autoware_vehicle_msgs::msg::VelocityReport;
 using tier4_debug_msgs::msg::Float64Stamped;
 using geometry_msgs::msg::TwistStamped;
+using nav_msgs::msg::OccupancyGrid;
+using std_msgs::msg::Float32MultiArray;
+using visualization_msgs::msg::MarkerArray;
 
 using Map = std::vector<std::vector<double>>;
 
@@ -70,6 +76,17 @@ private:
   rclcpp::Publisher<Float64Stamped>::SharedPtr current_map_error_pub_;
   rclcpp::Publisher<Float64Stamped>::SharedPtr updated_map_error_pub_;
   rclcpp::Publisher<Float64Stamped>::SharedPtr map_error_ratio_pub_;
+  
+  // Debug/Visualization Publishers
+  rclcpp::Publisher<OccupancyGrid>::SharedPtr original_map_occ_pub_;
+  rclcpp::Publisher<OccupancyGrid>::SharedPtr update_map_occ_pub_;
+  rclcpp::Publisher<OccupancyGrid>::SharedPtr data_ave_pub_;
+  rclcpp::Publisher<OccupancyGrid>::SharedPtr data_std_pub_;
+  rclcpp::Publisher<OccupancyGrid>::SharedPtr data_count_pub_;
+  rclcpp::Publisher<OccupancyGrid>::SharedPtr data_count_with_self_pose_pub_;
+  rclcpp::Publisher<MarkerArray>::SharedPtr index_pub_;
+  rclcpp::Publisher<Float32MultiArray>::SharedPtr original_map_raw_pub_;
+  rclcpp::Publisher<Float32MultiArray>::SharedPtr update_map_raw_pub_;
 
   // Polling Subscribers
   autoware_utils::InterProcessPollingSubscriber<SteeringReport> steer_sub_{this, "~/input/steer"};
@@ -222,6 +239,15 @@ private:
 
   /* Diag*/
   void check_update_suggest(diagnostic_updater::DiagnosticStatusWrapper & stat);
+  
+  /* Debug/Visualization functions */
+  void publish_map(const Map & value_map, const std::string & publish_type);
+  void publish_count_map();
+  void publish_index();
+  OccupancyGrid get_occ_msg(
+    const std::string & frame_id, const double height, const double width, 
+    const double resolution, const std::vector<int8_t> & map_value);
+  int nearest_value_index_search() const;
 
   enum GET_PITCH_METHOD { TF = 0, NONE = 1 };
 
