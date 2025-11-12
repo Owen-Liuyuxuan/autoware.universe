@@ -87,6 +87,41 @@ See [README_CONVERTER.md](README_CONVERTER.md) for more examples and conversion 
 4. **RLS Update**: Iteratively correct mapping offsets
 5. **Evaluate Accuracy**: Calculate RMSE to determine if saving is needed
 6. **Save Mapping**: Map automatically saved to CSV file
+7. **Monitor Progress**: View real-time visualization in RViz or generated plots
+
+## Visualization
+
+### RViz Real-time Display
+
+Launch RViz with the provided configuration:
+
+```bash
+rviz2 -d $(ros2 pkg prefix autoware_generic_value_calibrator)/share/autoware_generic_value_calibrator/rviz/occupancy.rviz
+```
+
+**Visualization Topics:**
+- `~/debug/data_count_self_pose_occ_map` - Data coverage with current position
+- `~/debug/original_occ_map` - Original default map
+- `~/debug/update_occ_map` - Calibrated map
+- `~/debug/data_average_occ_map` - Average acceleration values
+- `~/debug/data_std_dev_occ_map` - Standard deviation
+- `~/debug/occ_index` - Velocity and value index labels
+
+### SVG Plot Generation
+
+Run the visualization server to generate detailed plots:
+
+```bash
+ros2 run autoware_generic_value_calibrator generic_value_map_server.py
+```
+
+This creates `plot.svg` in the calibrated map directory with:
+- Default vs calibrated map comparison
+- All data points colored by pitch
+- Statistics (average, stddev, count) for each cell
+- Separate subplot for each velocity point
+
+See [VISUALIZATION_IMPLEMENTATION.md](../VISUALIZATION_IMPLEMENTATION.md) for details.
 
 ## Calibration Methods
 
