@@ -22,6 +22,7 @@
 #include "autoware_utils/ros/transform_listener.hpp"
 #include "diagnostic_updater/diagnostic_updater.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "tf2/utils.h"
 
 #include <Eigen/Dense>
 
@@ -32,6 +33,7 @@
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float32_multi_array.hpp"
 #include "tier4_debug_msgs/msg/float64_stamped.hpp"
+#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 #include "visualization_msgs/msg/marker_array.hpp"
 
 #include <cstdio>
@@ -144,7 +146,7 @@ private:
   const double dif_value_time_ = 0.16;  // 160ms
   const std::size_t twist_vec_max_size_ = 100;
   const std::size_t value_vec_max_size_ = 100;
-  const double timeout_sec_ = 0.1;
+  const double timeout_sec_ = 0.5;
   int max_data_count_;
   bool progress_file_output_ = false;
 

@@ -1,7 +1,8 @@
 <?xml version="1.0"?>
 <launch>
   <!-- System parameters -->
-  <arg name="use_sim_time" default="false" description="Use simulation time (set true for rosbag playback)"/>
+  <arg name="use_sim_time" default="true" description="Use simulation time (set true for rosbag playback)"/>
+  <arg name="rviz" default="true"/>
   
   <!-- Calibrator parameters -->
   <arg name="update_hz" default="10.0"/>
@@ -44,4 +45,6 @@
     <remap from="~/input/steer" to="/vehicle/status/steering_status"/>
     <remap from="~/input/value" to="$(var converted_topic)"/>
   </node>
+
+  <node pkg="rviz2" exec="rviz2" name="rviz2" output="screen" args="-d $(find-pkg-share autoware_generic_value_calibrator)/rviz/occupancy.rviz" if="$(var rviz)"/>
 </launch>
