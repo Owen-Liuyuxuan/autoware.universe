@@ -2,6 +2,8 @@
 
 ## Overview
 
+> **📌 Quick Start with Topic Converter**: If your input data is not already in `Float64Stamped` format (e.g., you want to use acceleration from `Control` messages), see [README_CONVERTER.md](README_CONVERTER.md) for easy topic conversion examples.
+
 `autoware_generic_value_calibrator` is a generic value calibration node that automatically calibrates the mapping relationship between arbitrary float64 input values and vehicle acceleration. It is similar to `autoware_accel_brake_map_calibrator`, but works with any generic numeric input rather than just throttle/brake pedal values.
 
 ## Features
@@ -57,11 +59,25 @@
 
 ## Usage
 
-### Launch Calibrator
+### Basic Usage (with Float64Stamped input)
 
 ```bash
 ros2 launch autoware_generic_value_calibrator generic_value_calibrator.launch.xml
 ```
+
+### With Topic Converter (recommended for most users)
+
+If your input is not already `Float64Stamped` (e.g., you want to use Control messages):
+
+```bash
+# Example: Calibrate using acceleration from Control messages
+ros2 launch autoware_generic_value_calibrator generic_value_calibrator_with_converter.launch.xml \
+  enable_converter:=true \
+  input_topic:=/control/command/control_cmd \
+  conversion_type:=control_acceleration
+```
+
+See [README_CONVERTER.md](README_CONVERTER.md) for more examples and conversion types.
 
 ### Calibration Workflow
 
