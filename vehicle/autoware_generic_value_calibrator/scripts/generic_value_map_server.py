@@ -93,11 +93,29 @@ class DrawGraph(Node):
 
         self.max_value_vel_thr = 0.7
 
+        # Load indices from calibrated map or default map
+        calibrated_map_file = self.calibrated_map_dir + "generic_value_map.csv"
+        default_map_file = self.default_map_dir + "default_value_map.csv"
+        
+        if Path(calibrated_map_file).exists():
+            CF.VALUE_LIST, CF.VEL_LIST = CF.load_indices_from_csv(calibrated_map_file)
+            self.get_logger().info("Loaded indices from calibrated map")
+        elif Path(default_map_file).exists():
+            CF.VALUE_LIST, CF.VEL_LIST = CF.load_indices_from_csv(default_map_file)
+            self.get_logger().info("Loaded indices from default map")
+        else:
+            CF.VALUE_LIST, CF.VEL_LIST = CF.get_default_indices()
+            self.get_logger().warning("No map file found, using default indices")
+
         # Debug output
         self.get_logger().info("default map dir: {}".format(self.default_map_dir))
         self.get_logger().info("calibrated map dir: {}".format(self.calibrated_map_dir))
         self.get_logger().info("calibrated method: {}".format(self.calibration_method))
         self.get_logger().info("log file :{}".format(self.log_file))
+        self.get_logger().info("Value range: [{:.3f}, {:.3f}] with {} points".format(
+            CF.VALUE_LIST.min(), CF.VALUE_LIST.max(), len(CF.VALUE_LIST)))
+        self.get_logger().info("Velocity range: [{:.3f}, {:.3f}] m/s with {} points".format(
+            CF.VEL_LIST.min(), CF.VEL_LIST.max(), len(CF.VEL_LIST)))
         self.get_logger().info("min_vel_thr : {}".format(self.min_vel_thr))
         self.get_logger().info("vel_diff_thr : {}".format(self.vel_diff_thr))
         self.get_logger().info("value_diff_thr : {}".format(self.value_diff_thr))

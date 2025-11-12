@@ -95,18 +95,109 @@ GenericValueCalibrator::GenericValueCalibrator(const rclcpp::NodeOptions & node_
   // Initialize map from CSV or create default map
   csv_default_map_dir_ = declare_parameter("csv_default_map_dir", std::string(""));
   
-  // Create a default map if no CSV is provided
-  // Velocity index: 0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20 m/s
-  vel_index_ = {0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0};
-  // Value index: -1.0 to 1.0 with 0.1 step
-  value_index_ = {-1.0, -0.8, -0.6, -0.4, -0.2, 0.0, 0.2, 0.4, 0.6, 0.8, 1.0};
+  // Get map index parameters (used if no CSV is provided)
+  const double value_min = declare_parameter("value_min", -1.0);
+  const double value_max = declare_parameter("value_max", 1.0);
+  const int value_num = declare_parameter("value_num", 11);
+  const double velocity_min = declare_parameter("velocity_min", 0.0);
+  const double velocity_max = declare_parameter("velocity_max", 20.0);
+  const int velocity_num = declare_parameter("velocity_num", 11);
   
-  // Initialize map with zeros
-  value_map_.resize(value_index_.size());
-  for (auto & m : value_map_) {
-    m.resize(vel_index_.size(), 0.0);
+  bool map_loaded_from_csv = false;
+  
+  // Try to load map from CSV if path is provided
+  if (!csv_default_map_dir_.empty()) {
+    std::ifstream csv_file(csv_default_map_dir_);
+    if (csv_file.is_open()) {
+      std::vector<std::vector<std::string>> csv_table;
+      std::string line;
+      while (std::getline(csv_file, line)) {
+        std::istringstream iss(line);
+        std::string cell;
+        std::vector<std::string> row;
+        while (std::getline(iss, cell, ',')) {
+          row.push_back(cell);
+        }
+        csv_table.push_back(row);
+      }
+      csv_file.close();
+      
+      if (!csv_table.empty() && csv_table.size() > 1) {
+        // Extract column indices (velocities) from first row
+        vel_index_.clear();
+        for (size_t i = 1; i < csv_table[0].size(); ++i) {
+          vel_index_.push_back(std::stod(csv_table[0][i]));
+        }
+        
+        // Extract row indices (values) from first column
+        value_index_.clear();
+        for (size_t i = 1; i < csv_table.size(); ++i) {
+          value_index_.push_back(std::stod(csv_table[i][0]));
+        }
+        
+        // Extract map data
+        value_map_.clear();
+        for (size_t i = 1; i < csv_table.size(); ++i) {
+          std::vector<double> row;
+          for (size_t j = 1; j < csv_table[i].size(); ++j) {
+            row.push_back(std::stod(csv_table[i][j]));
+          }
+          value_map_.push_back(row);
+        }
+        
+        map_loaded_from_csv = true;
+        RCLCPP_INFO(get_logger(), "Loaded map from CSV: %s", csv_default_map_dir_.c_str());
+        RCLCPP_INFO(get_logger(), "  Value range from CSV: [%.3f, %.3f] with %zu points",
+                    value_index_.front(), value_index_.back(), value_index_.size());
+        RCLCPP_INFO(get_logger(), "  Velocity range from CSV: [%.3f, %.3f] with %zu points",
+                    vel_index_.front(), vel_index_.back(), vel_index_.size());
+      } else {
+        RCLCPP_WARN(get_logger(), "CSV file is empty or invalid: %s", csv_default_map_dir_.c_str());
+      }
+    } else {
+      RCLCPP_WARN(get_logger(), "Failed to open CSV file: %s", csv_default_map_dir_.c_str());
+    }
   }
   
+  // Generate indices from parameters if CSV was not loaded
+  if (!map_loaded_from_csv) {
+    // Generate value_index from parameters
+    value_index_.clear();
+    if (value_num == 1) {
+      value_index_.push_back(value_min);
+    } else {
+      const double value_step = (value_max - value_min) / (value_num - 1);
+      for (int i = 0; i < value_num; ++i) {
+        value_index_.push_back(value_min + i * value_step);
+      }
+    }
+    
+    // Generate vel_index from parameters
+    vel_index_.clear();
+    if (velocity_num == 1) {
+      vel_index_.push_back(velocity_min);
+    } else {
+      const double vel_step = (velocity_max - velocity_min) / (velocity_num - 1);
+      for (int i = 0; i < velocity_num; ++i) {
+        vel_index_.push_back(velocity_min + i * vel_step);
+      }
+    }
+    
+    // Initialize map with default acceleration values (simple linear relationship)
+    value_map_.clear();
+    value_map_.resize(value_index_.size());
+    for (size_t i = 0; i < value_index_.size(); ++i) {
+      value_map_[i].resize(vel_index_.size());
+      // Default: acceleration = 2.0 * input_value (simple linear mapping)
+      const double default_accel = 2.0 * value_index_[i];
+      for (size_t j = 0; j < vel_index_.size(); ++j) {
+        value_map_[i][j] = default_accel;
+      }
+    }
+    RCLCPP_INFO(get_logger(), "Generated default map from parameters");
+  }
+  
+  // Initialize update map and covariance matrices
   update_value_map_.resize(value_index_.size());
   for (auto & m : update_value_map_) {
     m.resize(vel_index_.size(), 0.0);
@@ -117,6 +208,7 @@ GenericValueCalibrator::GenericValueCalibrator(const rclcpp::NodeOptions & node_
     m.resize(vel_index_.size(), covariance_);
   }
 
+  // Copy initial map to update map
   std::copy(value_map_.begin(), value_map_.end(), update_value_map_.begin());
 
   // initialize matrix for covariance calculation
@@ -170,6 +262,13 @@ GenericValueCalibrator::GenericValueCalibrator(const rclcpp::NodeOptions & node_
   logger_configure_ = std::make_unique<autoware_utils::LoggerLevelConfigure>(this);
   
   // Print important parameters
+  RCLCPP_INFO(get_logger(), "=== Map Index Configuration ===");
+  RCLCPP_INFO(get_logger(), "  Input value range: [%.3f, %.3f] with %d points", 
+              value_min, value_max, value_num);
+  RCLCPP_INFO(get_logger(), "  Velocity range: [%.3f, %.3f] m/s with %d points", 
+              velocity_min, velocity_max, velocity_num);
+  RCLCPP_INFO(get_logger(), "  Map size: %zu x %zu (value x velocity)", 
+              value_index_.size(), vel_index_.size());
   RCLCPP_INFO(get_logger(), "=== Calibration Parameters ===");
   RCLCPP_INFO(get_logger(), "  Update Hz: %.1f", update_hz_);
   RCLCPP_INFO(get_logger(), "  Velocity min threshold: %.3f m/s", velocity_min_threshold_);

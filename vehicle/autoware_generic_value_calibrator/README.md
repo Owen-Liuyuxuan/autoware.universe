@@ -42,8 +42,23 @@
 | `update_hz` | double | 10.0 | Update frequency |
 | `update_method` | string | "update_offset_each_cell" | Update algorithm |
 | `get_pitch_method` | string | "tf" | Method to get pitch angle |
-| `csv_default_map_dir` | string | "" | Default map directory |
+| `csv_default_map_dir` | string | "" | Default map directory (if empty, uses parameters below) |
 | `csv_calibrated_map_dir` | string | "" | Calibrated map directory |
+| `output_log_file` | string | "" | Path to log file for detailed calibration data |
+| `precision` | int | 3 | Decimal precision for CSV output |
+
+### Map Index Parameters
+
+| Parameter Name | Type | Default Value | Description |
+|----------------|------|---------------|-------------|
+| `value_min` | double | -1.0 | Minimum input value range |
+| `value_max` | double | 1.0 | Maximum input value range |
+| `value_num` | int | 11 | Number of points in input value range |
+| `velocity_min` | double | 0.0 | Minimum velocity range (m/s) |
+| `velocity_max` | double | 20.0 | Maximum velocity range (m/s) |
+| `velocity_num` | int | 11 | Number of points in velocity range |
+
+> **Note**: If `csv_default_map_dir` is provided, the map indices will be loaded from the CSV file and the index parameters above will be ignored. This ensures that each map file is self-contained with its own scale and range.
 
 ### Algorithm Parameters
 
@@ -53,16 +68,51 @@
 | `velocity_min_threshold` | double | 0.1 | Minimum velocity threshold |
 | `value_diff_threshold` | double | 0.03 | Value difference threshold |
 | `max_steer_threshold` | double | 0.2 | Maximum steering angle threshold |
-| `max_pitch_threshold` | double | 0.02 | Maximum pitch angle threshold |
+| `max_pitch_threshold` | double | 0.2 | Maximum pitch angle threshold |
 | `max_jerk_threshold` | double | 0.7 | Maximum jerk threshold |
 | `value_to_accel_delay` | double | 0.3 | Delay from input value to acceleration |
+| `update_suggest_thresh` | double | 0.7 | Threshold for update suggestion |
+| `max_data_count` | int | 200 | Maximum number of data points per cell |
 
 ## Usage
+
+### Configuring Input Value Range
+
+The calibrator supports flexible input value ranges through parameters. You can configure:
+
+1. **Value Range**: `value_min`, `value_max`, `value_num`
+   - Example: For a custom control signal ranging from -10 to 10:
+     ```yaml
+     value_min: -10.0
+     value_max: 10.0
+     value_num: 21  # Creates 21 points from -10 to 10
+     ```
+
+2. **Velocity Range**: `velocity_min`, `velocity_max`, `velocity_num`
+   - Example: For high-speed vehicles (0-30 m/s):
+     ```yaml
+     velocity_min: 0.0
+     velocity_max: 30.0
+     velocity_num: 16  # Creates 16 points
+     ```
+
+**Important**: 
+- If you provide a `csv_default_map_dir`, the indices will be loaded from the CSV file (self-contained)
+- If no CSV is provided, the map will be generated from the parameters above
+- The converter automatically reads indices from the CSV file, so no separate configuration is needed
 
 ### Basic Usage (with Float64Stamped input)
 
 ```bash
 ros2 launch autoware_generic_value_calibrator generic_value_calibrator.launch.xml
+```
+
+### Custom Range Example
+
+```bash
+ros2 launch autoware_generic_value_calibrator generic_value_calibrator.launch.xml \
+  value_min:=-5.0 value_max:=5.0 value_num:=21 \
+  velocity_min:=0.0 velocity_max:=30.0 velocity_num:=16
 ```
 
 ### With Topic Converter (recommended for most users)
