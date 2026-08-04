@@ -131,12 +131,12 @@ private:
   /**
    * @brief Publisher for the initial steering offset read from the calibration YAML file
    */
-  rclcpp::Publisher<Float32Stamped>::SharedPtr pub_initial_calibration_offset_;
+  rclcpp::Publisher<Float32Stamped>::SharedPtr pub_initial_calibration_value_;
 
   /**
    * @brief Publisher for the initial calibration offset plus the estimated steering offset
    */
-  rclcpp::Publisher<Float32Stamped>::SharedPtr pub_cumulative_steer_offset_;
+  rclcpp::Publisher<Float32Stamped>::SharedPtr pub_entire_steer_offset_;
 
   // Timer
   /**

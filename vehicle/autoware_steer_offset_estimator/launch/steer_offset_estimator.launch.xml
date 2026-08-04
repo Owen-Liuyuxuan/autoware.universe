@@ -24,7 +24,7 @@
     <remap from="~/output/steering_offset_covariance" to="~/steering_offset_covariance"/>
     <remap from="~/output/debug_info" to="~/debug_info"/>
     <remap from="~/output/steering_offset_update" to="~/steering_offset_update"/>
-    <remap from="~/output/initial_calibration_offset" to="~/initial_calibration_offset"/>
-    <remap from="~/output/cumulative_steering_offset" to="~/cumulative_steering_offset"/>
+    <remap from="~/output/initial_calibration_value" to="~/initial_calibration_value"/>
+    <remap from="~/output/entire_steering_offset" to="~/entire_steering_offset"/>
   </node>
 </launch>

@@ -68,10 +68,10 @@ SteerOffsetEstimatorNode::SteerOffsetEstimatorNode(const rclcpp::NodeOptions & n
   pub_debug_info_ = this->create_publisher<StringStamped>("~/output/debug_info", 1);
   pub_steer_offset_update_ = this->create_publisher<Float32Stamped>(
     "~/output/steering_offset_update", rclcpp::QoS{1}.transient_local());
-  pub_initial_calibration_offset_ =
-    this->create_publisher<Float32Stamped>("~/output/initial_calibration_offset", 1);
-  pub_cumulative_steer_offset_ =
-    this->create_publisher<Float32Stamped>("~/output/cumulative_steering_offset", 1);
+  pub_initial_calibration_value_ =
+    this->create_publisher<Float32Stamped>("~/output/initial_calibration_value", 1);
+  pub_entire_steer_offset_ =
+    this->create_publisher<Float32Stamped>("~/output/entire_steering_offset", 1);
 
   set_calibration_parameters();
 
@@ -216,8 +216,8 @@ void SteerOffsetEstimatorNode::publish_data(const SteerOffsetEstimationUpdated &
 
   // Uses the value cached at start-up; the calibration file is never re-read.
   if (initial_calibration_offset_) {
-    pub_float(pub_initial_calibration_offset_, initial_calibration_offset_.value());
-    pub_float(pub_cumulative_steer_offset_, initial_calibration_offset_.value() + result.offset);
+    pub_float(pub_initial_calibration_value_, initial_calibration_offset_.value());
+    pub_float(pub_entire_steer_offset_, initial_calibration_offset_.value() + result.offset);
   }
 
   if (is_publish_update()) {
