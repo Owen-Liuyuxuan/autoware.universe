@@ -84,26 +84,6 @@ using SAMPLER = mppi::sampling_distributions::GaussianDistribution<DYN::DYN_PARA
 
 using Mppi = VanillaMPPIController<DYN, COST, FB, kMppiHorizon, kNumRollouts, SAMPLER>;
 
-MppiIterationDiagnostics collectIterationDiagnostics(const Mppi & controller)
-{
-  MppiIterationDiagnostics diagnostics;
-  diagnostics.ess_per_iteration = controller.getEssPerIteration();
-  diagnostics.max_weight_per_iteration = controller.getMaxWeightPerIteration();
-
-  if (!diagnostics.ess_per_iteration.empty()) {
-    const auto min_ess_it =
-      std::min_element(diagnostics.ess_per_iteration.begin(), diagnostics.ess_per_iteration.end());
-    diagnostics.min_ess = *min_ess_it;
-    diagnostics.min_ess_iteration_index =
-      static_cast<int>(std::distance(diagnostics.ess_per_iteration.begin(), min_ess_it));
-  }
-  if (!diagnostics.max_weight_per_iteration.empty()) {
-    diagnostics.max_weight = *std::max_element(
-      diagnostics.max_weight_per_iteration.begin(), diagnostics.max_weight_per_iteration.end());
-  }
-  return diagnostics;
-}
-
 void applyUserCostParams(
   FirstOrderDubinsBicycleCostParams<kRefHorizon> & cost_params,
   const FirstOrderDubinsMppiCostParams & user)
@@ -788,18 +768,6 @@ struct FirstOrderDubinsMppiInterface::Impl
     controller->computeControl(x, 1);
     cudaStreamSynchronize(controller->stream_);
 
-    iteration_diagnostics = collectIterationDiagnostics(*controller);
-    const size_t diagnostic_count = std::min(
-      iteration_diagnostics.ess_per_iteration.size(),
-      iteration_diagnostics.max_weight_per_iteration.size());
-    for (size_t iteration = 0; iteration < diagnostic_count; ++iteration) {
-      RCLCPP_DEBUG(
-        mppiLogger(),
-        "MPPI optimization iteration=%zu total_iterations=%zu: ess=%.1f/%d "
-        "max_normalized_weight=%.9f",
-        iteration, diagnostic_count, iteration_diagnostics.ess_per_iteration[iteration],
-        kNumRollouts, iteration_diagnostics.max_weight_per_iteration[iteration]);
-    }
     const Mppi::control_trajectory u_opt_traj = controller->getControlSeq();
     u_opt = u_opt_traj;
 
