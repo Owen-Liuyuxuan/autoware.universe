@@ -584,7 +584,7 @@ FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>:
   const float x_pos = y[static_cast<int>(O::BASELINK_POS_I_X)];
   const float y_pos = y[static_cast<int>(O::BASELINK_POS_I_Y)];
   const float yaw = y[static_cast<int>(O::YAW)];
-  const float vel = y[static_cast<int>(O::TOTAL_VELOCITY)];
+  const float vel = y[static_cast<int>(O::BASELINK_VEL_B_X)];
 
   const float track_val = computeTrackValue(x_pos, y_pos, timestep);
   const float vel_diff = vel - ref_v_[timestep];
@@ -614,7 +614,7 @@ float FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARA
   const float x_pos = y[static_cast<int>(O::BASELINK_POS_I_X)];
   const float y_pos = y[static_cast<int>(O::BASELINK_POS_I_Y)];
   const float yaw = y[static_cast<int>(O::YAW)];
-  const float vel = y[static_cast<int>(O::TOTAL_VELOCITY)];
+  const float vel = y[static_cast<int>(O::BASELINK_VEL_B_X)];
 
   const float track_val = computeTrackValue(x_pos, y_pos, timestep);
   const float vel_diff = vel - ref_v_[timestep];

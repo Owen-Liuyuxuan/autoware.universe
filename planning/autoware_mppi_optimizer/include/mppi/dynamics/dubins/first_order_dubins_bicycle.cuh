@@ -107,6 +107,10 @@ public:
 
   __device__ void updateState(float * state, float * next_state, float * state_der, const float dt);
 
+  void enforceConstraints(Eigen::Ref<state_array> state, Eigen::Ref<control_array> control);
+
+  __device__ void enforceConstraints(float * state, float * control);
+
   void step(
     Eigen::Ref<state_array> state, Eigen::Ref<state_array> next_state,
     Eigen::Ref<state_array> state_der, const Eigen::Ref<const control_array> & control,

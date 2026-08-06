@@ -38,6 +38,214 @@ using TestCost = FirstOrderDubinsBicycleCost<kTestHorizon>;
 using TestCostParams = FirstOrderDubinsBicycleCostParams<kTestHorizon>;
 using CostOutputIndex = FirstOrderDubinsBicycleParams::OutputIndex;
 using CostControlIndex = FirstOrderDubinsBicycleParams::ControlIndex;
+using DynamicsStateIndex = FirstOrderDubinsBicycleParams::StateIndex;
+
+__global__ void evaluateForwardMotionBoundaries(
+  FirstOrderDubinsBicycle * model, float * integration_state, float * next_state,
+  float * state_derivative, float * constraint_state, float * control)
+{
+  model->updateState(integration_state, next_state, state_derivative, 0.1F);
+  __syncthreads();
+  model->enforceConstraints(constraint_state, control);
+}
+
+TEST(FirstOrderDubinsBicycleForwardMotion, ClampsReverseIntegrationAndNegativeAccelerationWindup)
+{
+  FirstOrderDubinsBicycleParams params;
+  params.min_accel = -10.0F;
+  FirstOrderDubinsBicycle model(params);
+  FirstOrderDubinsBicycle::state_array state = FirstOrderDubinsBicycle::state_array::Zero();
+  FirstOrderDubinsBicycle::state_array next_state = FirstOrderDubinsBicycle::state_array::Zero();
+  FirstOrderDubinsBicycle::state_array state_derivative =
+    FirstOrderDubinsBicycle::state_array::Zero();
+  FirstOrderDubinsBicycle::control_array control = FirstOrderDubinsBicycle::control_array::Zero();
+  FirstOrderDubinsBicycle::output_array output = FirstOrderDubinsBicycle::output_array::Zero();
+  state(static_cast<int>(DynamicsStateIndex::VEL_X)) = 0.1F;
+  state(static_cast<int>(DynamicsStateIndex::ACCELERATION)) = -5.0F;
+  control(static_cast<int>(CostControlIndex::ACCELERATION_CMD)) = -5.0F;
+
+  model.step(state, next_state, state_derivative, control, output, 0.0F, 0.1F);
+
+  EXPECT_FLOAT_EQ(next_state(static_cast<int>(DynamicsStateIndex::VEL_X)), 0.0F);
+  EXPECT_FLOAT_EQ(next_state(static_cast<int>(DynamicsStateIndex::ACCELERATION)), 0.0F);
+}
+
+TEST(FirstOrderDubinsBicycleForwardMotion, SaturatesLowSpeedDecelerationAtOneStepStop)
+{
+  FirstOrderDubinsBicycleParams params;
+  params.min_accel = -10.0F;
+  params.max_accel = 4.0F;
+  FirstOrderDubinsBicycle model(params);
+  FirstOrderDubinsBicycle::state_array state = FirstOrderDubinsBicycle::state_array::Zero();
+  FirstOrderDubinsBicycle::control_array control = FirstOrderDubinsBicycle::control_array::Zero();
+  state(static_cast<int>(DynamicsStateIndex::VEL_X)) = 0.5F;
+  control(static_cast<int>(CostControlIndex::ACCELERATION_CMD)) = -10.0F;
+
+  model.enforceConstraints(state, control);
+
+  EXPECT_FLOAT_EQ(control(static_cast<int>(CostControlIndex::ACCELERATION_CMD)), -5.0F);
+}
+
+TEST(FirstOrderDubinsBicycleForwardMotion, ExactStopRetainsPhysicalCommandBound)
+{
+  FirstOrderDubinsBicycleParams params;
+  params.min_accel = -10.0F;
+  params.max_accel = 4.0F;
+  FirstOrderDubinsBicycle model(params);
+  FirstOrderDubinsBicycle::state_array state = FirstOrderDubinsBicycle::state_array::Zero();
+  FirstOrderDubinsBicycle::control_array control = FirstOrderDubinsBicycle::control_array::Zero();
+  control(static_cast<int>(CostControlIndex::ACCELERATION_CMD)) = -20.0F;
+
+  model.enforceConstraints(state, control);
+
+  EXPECT_FLOAT_EQ(control(static_cast<int>(CostControlIndex::ACCELERATION_CMD)), -10.0F);
+}
+
+TEST(FirstOrderDubinsBicycleSpeedCost, PenalizesNegativeSignedVelocity)
+{
+  TestCost cost;
+  TestCostParams params;
+  params.speed_coeff = 1.0F;
+  params.track_coeff = 0.0F;
+  params.heading_coeff = 0.0F;
+  params.lateral_distance_coeff = 0.0F;
+  params.lateral_yaw_error_coeff = 0.0F;
+  params.crash_coeff = 0.0F;
+  params.drivable_area_crossing_coeff = 0.0F;
+  cost.setParams(params);
+  const float reference_x[] = {0.0F};
+  const float reference_y[] = {0.0F};
+  const float reference_velocity[] = {1.0F};
+  const float reference_yaw[] = {0.0F};
+  cost.setReferenceTrajectory(reference_x, reference_y, reference_velocity, 1, reference_yaw);
+
+  TestCost::output_array output = TestCost::output_array::Zero();
+  output(static_cast<int>(CostOutputIndex::TOTAL_VELOCITY)) = 1.0F;
+  output(static_cast<int>(CostOutputIndex::BASELINK_VEL_B_X)) = 1.0F;
+  int crash_status = 0;
+  const float forward_cost = cost.computeStateCost(output, 0, &crash_status);
+  output(static_cast<int>(CostOutputIndex::BASELINK_VEL_B_X)) = -1.0F;
+  crash_status = 0;
+  const float reverse_cost = cost.computeStateCost(output, 0, &crash_status);
+
+  EXPECT_FLOAT_EQ(forward_cost, 0.0F);
+  EXPECT_FLOAT_EQ(reverse_cost, 4.0F);
+  EXPECT_GT(reverse_cost, forward_cost);
+}
+
+TEST(FirstOrderDubinsBicycleForwardMotion, CpuAndGpuBoundaryResultsAreBitExact)
+{
+  int device_count = 0;
+  const cudaError_t device_error = cudaGetDeviceCount(&device_count);
+  if (device_error != cudaSuccess || device_count == 0) {
+    GTEST_SKIP() << "A CUDA device is required for dynamics parity";
+  }
+
+  FirstOrderDubinsBicycleParams params;
+  params.min_accel = -10.0F;
+  params.max_accel = 4.0F;
+  FirstOrderDubinsBicycle model(params);
+  std::array<float2, FirstOrderDubinsBicycle::CONTROL_DIM> control_ranges{};
+  control_ranges[static_cast<int>(CostControlIndex::ACCELERATION_CMD)] = {-10.0F, 4.0F};
+  control_ranges[static_cast<int>(CostControlIndex::STEER_CMD)] = {-0.45F, 0.45F};
+  model.setControlRanges(control_ranges);
+  model.GPUSetup();
+
+  FirstOrderDubinsBicycle::state_array integration_state =
+    FirstOrderDubinsBicycle::state_array::Zero();
+  FirstOrderDubinsBicycle::state_array next_state_cpu =
+    FirstOrderDubinsBicycle::state_array::Zero();
+  FirstOrderDubinsBicycle::state_array next_state_gpu =
+    FirstOrderDubinsBicycle::state_array::Zero();
+  FirstOrderDubinsBicycle::state_array state_derivative =
+    FirstOrderDubinsBicycle::state_array::Zero();
+  integration_state(static_cast<int>(DynamicsStateIndex::VEL_X)) = 0.1F;
+  integration_state(static_cast<int>(DynamicsStateIndex::ACCELERATION)) = -5.0F;
+  state_derivative(static_cast<int>(DynamicsStateIndex::VEL_X)) = -5.0F;
+
+  FirstOrderDubinsBicycle::state_array constraint_state =
+    FirstOrderDubinsBicycle::state_array::Zero();
+  constraint_state(static_cast<int>(DynamicsStateIndex::VEL_X)) = 0.5F;
+  FirstOrderDubinsBicycle::control_array control_cpu =
+    FirstOrderDubinsBicycle::control_array::Zero();
+  FirstOrderDubinsBicycle::control_array control_gpu =
+    FirstOrderDubinsBicycle::control_array::Zero();
+  control_cpu(static_cast<int>(CostControlIndex::ACCELERATION_CMD)) = -10.0F;
+  control_gpu = control_cpu;
+
+  model.updateState(integration_state, next_state_cpu, state_derivative, 0.1F);
+  model.enforceConstraints(constraint_state, control_cpu);
+
+  float * integration_state_device = nullptr;
+  float * next_state_device = nullptr;
+  float * state_derivative_device = nullptr;
+  float * constraint_state_device = nullptr;
+  float * control_device = nullptr;
+  ASSERT_EQ(
+    cudaMalloc(&integration_state_device, sizeof(float) * FirstOrderDubinsBicycle::STATE_DIM),
+    cudaSuccess);
+  ASSERT_EQ(
+    cudaMalloc(&next_state_device, sizeof(float) * FirstOrderDubinsBicycle::STATE_DIM),
+    cudaSuccess);
+  ASSERT_EQ(
+    cudaMalloc(&state_derivative_device, sizeof(float) * FirstOrderDubinsBicycle::STATE_DIM),
+    cudaSuccess);
+  ASSERT_EQ(
+    cudaMalloc(&constraint_state_device, sizeof(float) * FirstOrderDubinsBicycle::STATE_DIM),
+    cudaSuccess);
+  ASSERT_EQ(
+    cudaMalloc(&control_device, sizeof(float) * FirstOrderDubinsBicycle::CONTROL_DIM), cudaSuccess);
+  ASSERT_EQ(
+    cudaMemcpy(
+      integration_state_device, integration_state.data(),
+      sizeof(float) * FirstOrderDubinsBicycle::STATE_DIM, cudaMemcpyHostToDevice),
+    cudaSuccess);
+  ASSERT_EQ(
+    cudaMemcpy(
+      state_derivative_device, state_derivative.data(),
+      sizeof(float) * FirstOrderDubinsBicycle::STATE_DIM, cudaMemcpyHostToDevice),
+    cudaSuccess);
+  ASSERT_EQ(
+    cudaMemcpy(
+      constraint_state_device, constraint_state.data(),
+      sizeof(float) * FirstOrderDubinsBicycle::STATE_DIM, cudaMemcpyHostToDevice),
+    cudaSuccess);
+  ASSERT_EQ(
+    cudaMemcpy(
+      control_device, control_gpu.data(), sizeof(float) * FirstOrderDubinsBicycle::CONTROL_DIM,
+      cudaMemcpyHostToDevice),
+    cudaSuccess);
+
+  const dim3 threads(1U, static_cast<unsigned int>(FirstOrderDubinsBicycle::STATE_DIM), 1U);
+  evaluateForwardMotionBoundaries<<<1, threads>>>(
+    model.model_d_, integration_state_device, next_state_device, state_derivative_device,
+    constraint_state_device, control_device);
+  ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  ASSERT_EQ(
+    cudaMemcpy(
+      next_state_gpu.data(), next_state_device, sizeof(float) * FirstOrderDubinsBicycle::STATE_DIM,
+      cudaMemcpyDeviceToHost),
+    cudaSuccess);
+  ASSERT_EQ(
+    cudaMemcpy(
+      control_gpu.data(), control_device, sizeof(float) * FirstOrderDubinsBicycle::CONTROL_DIM,
+      cudaMemcpyDeviceToHost),
+    cudaSuccess);
+
+  for (int i = 0; i < FirstOrderDubinsBicycle::STATE_DIM; ++i) {
+    EXPECT_FLOAT_EQ(next_state_gpu(i), next_state_cpu(i));
+  }
+  for (int i = 0; i < FirstOrderDubinsBicycle::CONTROL_DIM; ++i) {
+    EXPECT_FLOAT_EQ(control_gpu(i), control_cpu(i));
+  }
+
+  EXPECT_EQ(cudaFree(integration_state_device), cudaSuccess);
+  EXPECT_EQ(cudaFree(next_state_device), cudaSuccess);
+  EXPECT_EQ(cudaFree(state_derivative_device), cudaSuccess);
+  EXPECT_EQ(cudaFree(constraint_state_device), cudaSuccess);
+  EXPECT_EQ(cudaFree(control_device), cudaSuccess);
+}
 
 TEST(FirstOrderDubinsBicycleSteeringCost, ZeroCoefficientsPreserveLegacyComfortCost)
 {

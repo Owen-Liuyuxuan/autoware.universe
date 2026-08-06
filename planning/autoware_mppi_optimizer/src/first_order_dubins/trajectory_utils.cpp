@@ -50,7 +50,7 @@ bool isOptimizationRequired(const Trajectory & trajectory)
       trajectory.points[i].pose.position.x - trajectory.points[i + 1U].pose.position.x,
       trajectory.points[i].pose.position.y - trajectory.points[i + 1U].pose.position.y);
   }
-  const bool is_short = length < 4.0;
+  const bool is_short = length < 1.0;
   return !is_stopping || !is_short;
 }
 

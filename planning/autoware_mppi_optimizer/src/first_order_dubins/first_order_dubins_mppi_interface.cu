@@ -1071,6 +1071,7 @@ FirstOrderDubinsMppiOptimizationResult FirstOrderDubinsMppiInterface::optimizeTr
     result.trajectory = input;
     result.debug.reference_trajectory = input;
     result.debug.optimized_trajectory = input;
+    result.debug.was_rejected = true;
     return result;
   }
 
