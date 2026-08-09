@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#include "autoware/mppi_optimizer/detail/trajectory_utils.hpp"
+#include "autoware/mppi_optimizer/detail/trajectory_validator.hpp"
 #include "autoware/mppi_optimizer/first_order_dubins_mppi_cost_params.hpp"
 #include "autoware/mppi_optimizer/first_order_dubins_mppi_interface.hpp"
 #include "autoware/mppi_optimizer/mppi_debug_trajectory_logger.hpp"
@@ -39,6 +41,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <iterator>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -50,12 +53,14 @@ namespace autoware::mppi_optimizer
 {
 namespace
 {
-constexpr int kMppiHorizon = 80;
+constexpr int kMppiHorizon = detail::kMppiHorizon;
 constexpr int kRefHorizon = kMppiHorizon;
-constexpr float kDt = 0.1F;
-constexpr size_t kMaxIter = 1;
-constexpr int kNumRollouts = 32 * 1024;
-constexpr int kMaxVizRollouts = 200;
+constexpr float kDt = detail::kMppiDt;
+constexpr size_t kMaxIter = 3;
+constexpr int kNumRollouts = 8 * 1024;
+constexpr float kStdDevDecay = 0.80;
+constexpr int kMaxVizRollouts = 256;
+constexpr int kMaxWorstVizRollouts = 128;
 constexpr char kLoggerName[] = "first_order_dubins_mppi";
 
 rclcpp::Logger mppiLogger()
@@ -83,7 +88,6 @@ void applyUserCostParams(
   FirstOrderDubinsBicycleCostParams<kRefHorizon> & cost_params,
   const FirstOrderDubinsMppiCostParams & user)
 {
-  cost_params.desired_speed = user.desired_speed;
   cost_params.speed_coeff = user.speed_coeff;
   cost_params.track_coeff = user.track_coeff;
   cost_params.track_terminal_scale = user.track_terminal_scale;
@@ -92,11 +96,12 @@ void applyUserCostParams(
   cost_params.lateral_yaw_error_coeff = user.lateral_yaw_error_coeff;
   cost_params.crash_coeff = user.crash_coeff;
   cost_params.boundary_threshold = user.boundary_threshold;
-  cost_params.boundary_threshold_left = user.boundary_threshold_left;
-  cost_params.boundary_threshold_right = user.boundary_threshold_right;
   cost_params.accel_cmd_coeff = user.accel_cmd_coeff;
   cost_params.steer_cmd_coeff = user.steer_cmd_coeff;
   cost_params.steer_rate_coeff = user.steer_rate_coeff;
+  cost_params.steer_rate_l2_coeff = user.steer_rate_l2_coeff;
+  cost_params.steer_accel_coeff = user.steer_accel_coeff;
+  cost_params.cmd_slew_coeff = user.cmd_slew_coeff;
   cost_params.lateral_acceleration_coeff = user.lateral_acceleration_coeff;
   cost_params.lateral_jerk_coeff = user.lateral_jerk_coeff;
   cost_params.longitudinal_jerk_coeff = user.longitudinal_jerk_coeff;
@@ -146,52 +151,6 @@ float steeringTireAngleRad(
   return steering_status->steering_tire_angle;
 }
 
-geometry_msgs::msg::Quaternion quaternionFromYaw(const float yaw)
-{
-  tf2::Quaternion quaternion;
-  quaternion.setRPY(0.0, 0.0, yaw);
-  return tf2::toMsg(quaternion);
-}
-
-/**
- * Build the MPPI cost reference horizon.
- *
- * Diffusion trajectories are already time-offset (first point ≈ t = dt = 0.1 s). MPPI costs the
- * *post-step* state at each horizon index t (step then cost with ref[t]), so:
- *   ref[t] = input trajectory points[t] as published (no ego prepend, no path projection)
- * Empty input falls back to holding the ego sample.
- */
-std::vector<mppi::path::PathReferenceSample> buildDiffusionReferenceHorizon(
-  const Trajectory & trajectory, const float ego_x, const float ego_y, const float ego_yaw,
-  const float ego_v)
-{
-  std::vector<mppi::path::PathReferenceSample> ref(static_cast<size_t>(kRefHorizon));
-  if (trajectory.points.empty()) {
-    for (size_t k = 0; k < ref.size(); ++k) {
-      ref[k].t = static_cast<float>(k + 1U) * kDt;
-      ref[k].x = ego_x;
-      ref[k].y = ego_y;
-      ref[k].yaw = ego_yaw;
-      ref[k].v = ego_v;
-      ref[k].arc_length_s = 0.0F;
-    }
-    return ref;
-  }
-
-  for (size_t k = 0; k < ref.size(); ++k) {
-    const size_t idx = std::min(k, trajectory.points.size() - 1U);
-    const auto & point = trajectory.points[idx];
-    ref[k].t = static_cast<float>(k + 1U) * kDt;
-    ref[k].x = static_cast<float>(point.pose.position.x);
-    ref[k].y = static_cast<float>(point.pose.position.y);
-    ref[k].yaw = static_cast<float>(tf2::getYaw(point.pose.orientation));
-    ref[k].v = point.longitudinal_velocity_mps;
-    ref[k].arc_length_s = 0.0F;
-  }
-
-  return ref;
-}
-
 void replayRolloutPoints(
   DYN & model, const DYN::state_array & x0, const float * controls, const int horizon,
   const float dt, std::vector<std::pair<float, float>> & points)
@@ -218,6 +177,28 @@ void replayRolloutPoints(
     model.step(x, x_next, xdot, u, y, static_cast<float>(t), dt);
     points.emplace_back(x_next(pos_x_idx), x_next(pos_y_idx));
     x = x_next;
+  }
+}
+
+void buildSteeringStepCostBreakdown(
+  DYN & model, COST & cost, const DYN::state_array & initial_state,
+  const Mppi::control_trajectory & controls, std::vector<MppiSteeringStepCostBreakdown> & breakdown)
+{
+  DYN::state_array state = initial_state;
+  DYN::state_array next_state = model.getZeroState();
+  DYN::state_array state_der = model.getZeroState();
+  DYN::output_array output = DYN::output_array::Zero();
+  breakdown.clear();
+  breakdown.reserve(static_cast<size_t>(kMppiHorizon));
+  for (int timestep = 0; timestep < kMppiHorizon; ++timestep) {
+    DYN::control_array control = controls.col(timestep);
+    model.enforceConstraints(state, control);
+    model.step(state, next_state, state_der, control, output, static_cast<float>(timestep), kDt);
+    const auto terms = cost.computeSteeringSmoothnessCost(control.data(), output.data(), timestep);
+    breakdown.push_back(
+      MppiSteeringStepCostBreakdown{
+        terms.steer_rate_l2_cost, terms.cmd_slew_cost, terms.steer_accel_cost});
+    state = next_state;
   }
 }
 
@@ -282,6 +263,67 @@ void selectTopRolloutIndices(
     [&](const int rollout) { return raw_costs[static_cast<size_t>(rollout)]; });
 }
 
+/** Highest raw-cost samples, excluding any indices already chosen as top-weighted. */
+void selectWorstRolloutIndices(
+  const std::vector<float> & raw_costs, const std::vector<int> & exclude_indices, const int worst_n,
+  std::vector<int> & rollout_indices, std::vector<float> & selected_costs)
+{
+  rollout_indices.clear();
+  selected_costs.clear();
+  const int num_rollouts = static_cast<int>(raw_costs.size());
+  if (worst_n <= 0 || num_rollouts <= 0) {
+    return;
+  }
+
+  std::vector<char> excluded(static_cast<size_t>(num_rollouts), 0);
+  for (const int idx : exclude_indices) {
+    if (idx >= 0 && idx < num_rollouts) {
+      excluded[static_cast<size_t>(idx)] = 1;
+    }
+  }
+
+  std::vector<int> candidates;
+  candidates.reserve(static_cast<size_t>(num_rollouts));
+  for (int i = 0; i < num_rollouts; ++i) {
+    if (!excluded[static_cast<size_t>(i)]) {
+      candidates.push_back(i);
+    }
+  }
+  if (candidates.empty()) {
+    return;
+  }
+
+  const int keep = std::min(worst_n, static_cast<int>(candidates.size()));
+  std::partial_sort(
+    candidates.begin(), candidates.begin() + keep, candidates.end(), [&](const int a, const int b) {
+      return raw_costs[static_cast<size_t>(a)] > raw_costs[static_cast<size_t>(b)];
+    });
+  candidates.resize(static_cast<size_t>(keep));
+  rollout_indices = std::move(candidates);
+  selected_costs.resize(rollout_indices.size());
+  std::transform(
+    rollout_indices.begin(), rollout_indices.end(), selected_costs.begin(),
+    [&](const int rollout) { return raw_costs[static_cast<size_t>(rollout)]; });
+}
+
+void appendReplayedRollouts(
+  DYN & model, const DYN::state_array & x0, const std::vector<float> & host_controls,
+  const std::vector<float> & selected_costs, const bool is_worst,
+  std::vector<FirstOrderDubinsMppiRollout> & rollouts)
+{
+  size_t out_idx = 0;
+  for (const float cost : selected_costs) {
+    FirstOrderDubinsMppiRollout rollout;
+    rollout.cost = cost;
+    rollout.is_worst = is_worst;
+    const float * controls = host_controls.data() + out_idx * static_cast<size_t>(kMppiHorizon) *
+                                                      static_cast<size_t>(DYN::CONTROL_DIM);
+    replayRolloutPoints(model, x0, controls, kMppiHorizon, kDt, rollout.points);
+    rollouts.push_back(std::move(rollout));
+    ++out_idx;
+  }
+}
+
 void buildRolloutVisualization(
   Mppi & controller, SAMPLER & sampler, DYN & model, const DYN::state_array & x_at_optimization,
   const float lambda, FirstOrderDubinsMppiDebug & debug)
@@ -304,61 +346,37 @@ void buildRolloutVisualization(
     raw_costs[i] = (w > 0.0F) ? (baseline - lambda * std::log(w)) : (baseline + 1.0e30F);
   }
 
-  std::vector<int> rollout_indices;
-  std::vector<float> selected_costs;
-  selectTopRolloutIndices(
-    normalized_weights, raw_costs, kMaxVizRollouts, rollout_indices, selected_costs);
+  std::vector<int> top_indices;
+  std::vector<float> top_costs;
+  selectTopRolloutIndices(normalized_weights, raw_costs, kMaxVizRollouts, top_indices, top_costs);
+
+  std::vector<int> worst_indices;
+  std::vector<float> worst_costs;
+  selectWorstRolloutIndices(
+    raw_costs, top_indices, kMaxWorstVizRollouts, worst_indices, worst_costs);
+
+  std::vector<int> all_indices = top_indices;
+  all_indices.insert(all_indices.end(), worst_indices.begin(), worst_indices.end());
 
   std::vector<float> host_controls;
-  copySamplerControlsToHost(sampler, kMppiHorizon, rollout_indices, host_controls);
+  copySamplerControlsToHost(sampler, kMppiHorizon, all_indices, host_controls);
 
   debug.rollouts.clear();
-  debug.rollouts.reserve(rollout_indices.size());
-  size_t out_idx = 0;
-  for (const float cost : selected_costs) {
-    FirstOrderDubinsMppiRollout rollout;
-    rollout.cost = cost;
-    const float * controls = host_controls.data() + out_idx * static_cast<size_t>(kMppiHorizon) *
-                                                      static_cast<size_t>(DYN::CONTROL_DIM);
-    replayRolloutPoints(model, x_at_optimization, controls, kMppiHorizon, kDt, rollout.points);
-    debug.rollouts.push_back(std::move(rollout));
-    ++out_idx;
+  debug.rollouts.reserve(all_indices.size());
+  const size_t top_ctrl_floats =
+    top_indices.size() * static_cast<size_t>(kMppiHorizon) * static_cast<size_t>(DYN::CONTROL_DIM);
+  const std::vector<float> top_controls(
+    host_controls.begin(), host_controls.begin() + static_cast<std::ptrdiff_t>(std::min(
+                                                     top_ctrl_floats, host_controls.size())));
+  appendReplayedRollouts(model, x_at_optimization, top_controls, top_costs, false, debug.rollouts);
+  if (!worst_indices.empty()) {
+    const std::vector<float> worst_controls(
+      host_controls.begin() + static_cast<std::ptrdiff_t>(top_ctrl_floats), host_controls.end());
+    appendReplayedRollouts(
+      model, x_at_optimization, worst_controls, worst_costs, true, debug.rollouts);
   }
 }
 
-/// @brief check if the given trajectory needs to be optimized
-[[nodiscard]] bool is_optimization_required(const autoware::mppi_optimizer::Trajectory & trajectory)
-{
-  const auto is_stopping = std::find_if(
-                             trajectory.points.begin(), trajectory.points.end(),
-                             [&](const autoware_planning_msgs::msg::TrajectoryPoint & p) {
-                               return p.longitudinal_velocity_mps < 0.02;
-                             }) != trajectory.points.end();
-  auto length = 0.0;
-  for (auto i = 0UL; i + 1 < trajectory.points.size(); ++i) {
-    length += std::hypot(
-      trajectory.points[i].pose.position.x - trajectory.points[i + 1].pose.position.x,
-      trajectory.points[i].pose.position.y - trajectory.points[i + 1].pose.position.y);
-  }
-  const auto is_short = length < 4.0;
-  return !is_stopping || !is_short;
-}
-
-/// @brief override initial 0 velocities with engage velocities
-void set_initial_engage_velocity(autoware::mppi_optimizer::Trajectory & trajectory)
-{
-  constexpr auto engage_velocity = 0.25;
-  if (trajectory.points.size() < 3) return;
-  const auto wants_to_move = std::find_if(
-                               trajectory.points.begin(), trajectory.points.end(),
-                               [&](const autoware_planning_msgs::msg::TrajectoryPoint & p) {
-                                 return p.longitudinal_velocity_mps > engage_velocity;
-                               }) != trajectory.points.end();
-  if (wants_to_move && trajectory.points[0].longitudinal_velocity_mps < 0.05) {
-    trajectory.points[0].longitudinal_velocity_mps = engage_velocity;
-    trajectory.points[1].longitudinal_velocity_mps = engage_velocity;
-  }
-}
 }  // namespace
 
 struct FirstOrderDubinsMppiInterface::Impl
@@ -382,6 +400,7 @@ struct FirstOrderDubinsMppiInterface::Impl
   Mppi::control_trajectory u_nom = Mppi::control_trajectory::Zero();
   Mppi::control_trajectory u_opt = Mppi::control_trajectory::Zero();
   DYN::state_array x = DYN::state_array::Zero();
+  MppiIterationDiagnostics iteration_diagnostics;
 
   std::vector<float> obs_traj_x;
   std::vector<float> obs_traj_y;
@@ -412,6 +431,16 @@ struct FirstOrderDubinsMppiInterface::Impl
   /** Fill debug.rollouts with top-K weighted samples (CPU replay). Offline retune only by default.
    */
   bool enable_rollout_visualization{false};
+  /** One-shot u_nom override from offline retune (NNNNNN_nominal.csv). */
+  bool forced_nominal_pending{false};
+  std::vector<float> forced_nominal_accel;
+  std::vector<float> forced_nominal_steer;
+  /** Snapshot of u_nom after seeding, written to NNNNNN_nominal.csv. */
+  std::vector<float> logged_nominal_accel;
+  std::vector<float> logged_nominal_steer;
+  /** One-shot downstream command boundary; absent means use measured steering. */
+  std::optional<float> pending_last_applied_steer_cmd;
+  float resolved_last_applied_steer_cmd{0.0F};
 
   Impl() : feedback(&model, kDt), sampler(SAMPLER::SAMPLING_PARAMS_T{}) {}
 
@@ -462,18 +491,19 @@ struct FirstOrderDubinsMppiInterface::Impl
     // a zero (or explicit) steer seed, not from huge white noise.
     // Historical: 0.001 * (L/0.32) ≈ 0.015 rad on j6; 0.01 * (L/0.32) ≈ 0.15 rad was too noisy.
     constexpr float kReferenceWheelBase = 0.32F;
-    constexpr float kReferenceSteerStd = 2e-3F;
+    constexpr float kReferenceSteerStd = 1.5e-3F;
     const float steer_std = kReferenceSteerStd * (vehicle_params.wheel_base / kReferenceWheelBase);
 
     sp.std_dev[static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::STEER_CMD)] =
       steer_std;
     sp.sum_strides = std::max(32, (kNumRollouts + 1023) / 1024);
+    sp.std_dev_decay = kStdDevDecay;
 #ifdef USE_COLOURED_NOISE
     // Power-law PSD exponents (0 = white, 1 = pink, 2 = brown). Pink steer keeps lateral
     // reach while cutting high-frequency δ_cmd chatter from i.i.d. Gaussian samples.
     sp.exponents[static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::ACCELERATION_CMD)] =
       0.5F;
-    sp.exponents[static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::STEER_CMD)] = 2.0F;
+    sp.exponents[static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::STEER_CMD)] = 1.5F;
 #elif defined(USE_SMOOTH_MPPI)
     // Smooth-MPPI samples action derivatives and integrates with dt.
     sp.dt = kDt;
@@ -503,15 +533,15 @@ struct FirstOrderDubinsMppiInterface::Impl
       "MPPI GPU initialized (horizon=%d, rollouts=%d, dt=%.2f, lambda=%.1f, "
       "wheel_base=%.2f, max_steer=%.2f, steer_std=%.3f, acc_tau=%.2f, steer_tau=%.2f, "
       "steer_rate_lim=%.2f, vel_rate_lim=%.2f, ego=%.2fx%.2f, axle_to_center=%.2f, "
-      "desired_speed=%.2f, boundary_threshold=%.2f, obs_margin=%.2f, road_border_margin=%.2f, "
+      "boundary_threshold=%.2f, obs_margin=%.2f, road_border_margin=%.2f, "
       "drivable_area_coeff=%.2f)",
       kMppiHorizon, kNumRollouts, kDt, user_cost_params_.lambda, vehicle_params.wheel_base,
       vehicle_params.max_steer_angle, steer_std, vehicle_params.acc_time_constant,
       vehicle_params.steer_time_constant, vehicle_params.steer_rate_lim,
       vehicle_params.vel_rate_lim, vehicle_params.ego_length, vehicle_params.ego_width,
-      vehicle_params.ego_axle_to_box_center, cost_params.desired_speed,
-      cost_params.boundary_threshold, cost_params.obstacle_collision_margin,
-      cost_params.road_border_collision_margin, cost_params.drivable_area_crossing_coeff);
+      vehicle_params.ego_axle_to_box_center, cost_params.boundary_threshold,
+      cost_params.obstacle_collision_margin, cost_params.road_border_collision_margin,
+      cost_params.drivable_area_crossing_coeff);
   }
 
   void resetTrackingState()
@@ -523,48 +553,80 @@ struct FirstOrderDubinsMppiInterface::Impl
 
   void seedNominalControlFromLastOptimized()
   {
-    // Drop the control already applied at the previous cycle; hold the terminal command.
-    for (int t = 0; t < kMppiHorizon - 1; ++t) {
-      u_nom.col(t) = u_opt.col(t + 1);
+    std::vector<FirstOrderDubinsMppiControl> previous(static_cast<size_t>(kMppiHorizon));
+    const int accel_idx =
+      static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::ACCELERATION_CMD);
+    const int steer_idx = static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::STEER_CMD);
+    for (int t = 0; t < kMppiHorizon; ++t) {
+      previous[static_cast<size_t>(t)].accel_cmd = u_opt(accel_idx, t);
+      previous[static_cast<size_t>(t)].steer_cmd = u_opt(steer_idx, t);
     }
-    u_nom.col(kMppiHorizon - 1) = u_opt.col(kMppiHorizon - 1);
+    const auto nominal = detail::shiftNominalControl(previous, kMppiHorizon);
+    for (int t = 0; t < kMppiHorizon - 1; ++t) {
+      u_nom(accel_idx, t) = nominal[static_cast<size_t>(t)].accel_cmd;
+      u_nom(steer_idx, t) = nominal[static_cast<size_t>(t)].steer_cmd;
+    }
+    u_nom(accel_idx, kMppiHorizon - 1) = nominal.back().accel_cmd;
+    u_nom(steer_idx, kMppiHorizon - 1) = nominal.back().steer_cmd;
   }
 
   void seedNominalControlFromDiffusionReference(
     const Trajectory & reference, const size_t start_idx)
   {
-    if (reference.points.empty()) {
-      u_nom.setZero();
-      return;
-    }
-
     const int accel_idx =
       static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::ACCELERATION_CMD);
     const int steer_idx = static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::STEER_CMD);
-    const float min_accel = vehicle_params.min_accel();
-    const float max_accel = vehicle_params.max_accel();
-    const float max_steer = vehicle_params.max_steer_angle;
-
+    const auto nominal = detail::buildDiffusionNominalControl(
+      reference, start_idx, vehicle_params, kMppiHorizon,
+      user_cost_params_.nominal_curvature_min_chord_length_m);
     for (int t = 0; t < kMppiHorizon; ++t) {
-      const size_t idx = std::min(start_idx + static_cast<size_t>(t), reference.points.size() - 1U);
-      const auto & point = reference.points[idx];
-      u_nom(accel_idx, t) = std::clamp(point.acceleration_mps2, min_accel, max_accel);
+      u_nom(accel_idx, t) = nominal[static_cast<size_t>(t)].accel_cmd;
+      u_nom(steer_idx, t) = nominal[static_cast<size_t>(t)].steer_cmd;
+    }
+  }
 
-      // Only use an explicit steer command if the reference provides one. Do NOT derive steer
-      // from path curvature: that pre-solves lateral tracking inside u_nom, so MPPI δ_cmd
-      // barely moves when track/heading costs are retuned (samples stay glued to the seed).
-      u_nom(steer_idx, t) = std::clamp(point.front_wheel_angle_rad, -max_steer, max_steer);
+  void seedNominalControlFromForced()
+  {
+    const int accel_idx =
+      static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::ACCELERATION_CMD);
+    const int steer_idx = static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::STEER_CMD);
+    const auto nominal = detail::buildForcedNominalControl(
+      forced_nominal_accel, forced_nominal_steer, vehicle_params, kMppiHorizon);
+    for (int t = 0; t < kMppiHorizon; ++t) {
+      u_nom(accel_idx, t) = nominal[static_cast<size_t>(t)].accel_cmd;
+      u_nom(steer_idx, t) = nominal[static_cast<size_t>(t)].steer_cmd;
+    }
+  }
+
+  void snapshotNominalForLog()
+  {
+    const int accel_idx =
+      static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::ACCELERATION_CMD);
+    const int steer_idx = static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::STEER_CMD);
+    logged_nominal_accel.resize(static_cast<size_t>(kMppiHorizon));
+    logged_nominal_steer.resize(static_cast<size_t>(kMppiHorizon));
+    for (int t = 0; t < kMppiHorizon; ++t) {
+      logged_nominal_accel[static_cast<size_t>(t)] = u_nom(accel_idx, t);
+      logged_nominal_steer[static_cast<size_t>(t)] = u_nom(steer_idx, t);
     }
   }
 
   void seedNominalControl(const Trajectory & reference, const size_t start_idx)
   {
+    if (forced_nominal_pending) {
+      seedNominalControlFromForced();
+      forced_nominal_pending = false;
+      snapshotNominalForLog();
+      return;
+    }
     // After a tracking reset, step_count is 0 and u_opt was cleared — fall back to DP seed.
     if (use_last_control_as_nominal && step_count > 0) {
       seedNominalControlFromLastOptimized();
+      snapshotNominalForLog();
       return;
     }
     seedNominalControlFromDiffusionReference(reference, start_idx);
+    snapshotNominalForLog();
   }
 
   void updateDiffusionReference(
@@ -585,7 +647,7 @@ struct FirstOrderDubinsMppiInterface::Impl
     diffusion_reference = reference;
     tracked_objects = ignore_obstacles ? TrackedObjects{} : tracked_objects_in;
     road_borders = road_borders_in;
-    drivable_area = drivable_area_in;
+    drivable_area = ignore_drivable_area ? std::vector<Segment>() : drivable_area_in;
     if (road_borders.size() > static_cast<size_t>(COST::kMaxRoadBorderSegments)) {
       RCLCPP_WARN(
         mppiLogger(), "Road-border segment count %zu exceeds GPU capacity %d; truncating",
@@ -597,9 +659,6 @@ struct FirstOrderDubinsMppiInterface::Impl
         drivable_area.size(), COST::kMaxDrivableAreaSegments);
     }
     obstacles.clear();
-    // Boundary crash is disabled on this stack (isEgoOutsideDrivableArea always false).
-    // ignore_drivable_area remains an ablation API flag; it does not reintroduce road borders.
-    (void)ignore_drivable_area;
 
     // Diffusion reference is already time-aligned (point[t] ≈ after step t). Seed from index 0.
     tracking_start_idx = 0U;
@@ -608,24 +667,40 @@ struct FirstOrderDubinsMppiInterface::Impl
     }
     seedNominalControl(reference, tracking_start_idx);
 
-    const float ego_yaw = yawFromOdometry(odometry);
-    const float ego_v = static_cast<float>(odometry.twist.twist.linear.x);
+    const auto initial_state =
+      detail::makeInitialState(odometry, acceleration, steering_status, vehicle_params);
 
     x = model.getZeroState();
-    x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::POS_X)) =
-      static_cast<float>(odometry.pose.pose.position.x);
-    x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::POS_Y)) =
-      static_cast<float>(odometry.pose.pose.position.y);
-    x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::YAW)) = ego_yaw;
-    x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::VEL_X)) = ego_v;
-    const float ego_accel = std::clamp(
-      longitudinalAccelerationMps2(acceleration), vehicle_params.min_accel(),
-      vehicle_params.max_accel());
-    x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::ACCELERATION)) = ego_accel;
-    const float ego_steer = std::clamp(
-      steeringTireAngleRad(steering_status), -vehicle_params.max_steer_angle,
-      vehicle_params.max_steer_angle);
-    x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::STEER_ANGLE)) = ego_steer;
+    x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::POS_X)) = initial_state.x;
+    x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::POS_Y)) = initial_state.y;
+    x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::YAW)) = initial_state.yaw;
+    x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::VEL_X)) = initial_state.velocity;
+    x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::ACCELERATION)) =
+      initial_state.acceleration;
+    x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::STEER_ANGLE)) =
+      initial_state.steering;
+    prepareSteeringSmoothnessBoundary(initial_state.steering);
+  }
+
+  void prepareSteeringSmoothnessBoundary(const float measured_steering)
+  {
+    float boundary_command = measured_steering;
+    if (
+      pending_last_applied_steer_cmd.has_value() &&
+      std::isfinite(*pending_last_applied_steer_cmd)) {
+      boundary_command =
+        std::clamp(*pending_last_applied_steer_cmd, -dyn.max_steer_angle, dyn.max_steer_angle);
+    }
+    pending_last_applied_steer_cmd.reset();
+    resolved_last_applied_steer_cmd = boundary_command;
+
+    const float steer_tau = std::max(dyn.steer_time_constant, 1.0E-4F);
+    const float boundary_rate =
+      clampSteerRate(dyn, (boundary_command - measured_steering) / steer_tau);
+    x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::LAST_STEER_COMMAND)) =
+      boundary_command;
+    x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::LAST_STEER_RATE)) = boundary_rate;
+    cost.setLastAppliedSteerCommand(boundary_command);
   }
 
   void uploadBoundarySegments()
@@ -644,11 +719,22 @@ struct FirstOrderDubinsMppiInterface::Impl
 
   FirstOrderDubinsMppiControl runStep()
   {
-    const std::vector<mppi::path::PathReferenceSample> ref = buildDiffusionReferenceHorizon(
-      diffusion_reference, x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::POS_X)),
-      x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::POS_Y)),
-      x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::YAW)),
-      x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::VEL_X)));
+    detail::InitialState ego;
+    ego.x = x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::POS_X));
+    ego.y = x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::POS_Y));
+    ego.yaw = x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::YAW));
+    ego.velocity = x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::VEL_X));
+    const auto prepared_reference =
+      detail::buildReferenceHorizon(diffusion_reference, ego, kRefHorizon, kDt);
+    std::vector<mppi::path::PathReferenceSample> ref(prepared_reference.size());
+    for (size_t i = 0; i < prepared_reference.size(); ++i) {
+      ref[i].t = prepared_reference[i].time;
+      ref[i].x = prepared_reference[i].x;
+      ref[i].y = prepared_reference[i].y;
+      ref[i].yaw = prepared_reference[i].yaw;
+      ref[i].v = prepared_reference[i].velocity;
+      ref[i].arc_length_s = 0.0F;
+    }
     mppi::cost::fillFirstOrderDubinsBicycleCostFromPathReference<kRefHorizon>(cost, ref);
 
     int obstacle_count = 0;
@@ -705,21 +791,25 @@ struct FirstOrderDubinsMppiInterface::Impl
 
     RCLCPP_DEBUG(
       mppiLogger(),
-      "MPPI track step %d: start_idx=%zu ref_v0=%.2f u_accel=%.3f u_steer=%.3f "
-      "ego_v=%.2f baseline_cost=%.2f",
+      "\tMPPI track step %d: start_idx=%zu ref_v0=%.2f u_accel=%.3f u_steer=%.3f "
+      "ego_v=%.2f baseline_cost=%.2f min_ess=%.1f/%d min_ess_iteration=%d "
+      "max_normalized_weight=%.9f",
       step_count, tracking_start_idx, ref.empty() ? 0.0F : ref.front().v, control.accel_cmd,
       control.steer_cmd, x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::VEL_X)),
-      controller->getBaselineCost());
+      controller->getBaselineCost(), iteration_diagnostics.min_ess, kNumRollouts,
+      iteration_diagnostics.min_ess_iteration_index, iteration_diagnostics.max_weight);
 
     return control;
   }
 
   void teardown()
   {
-    if (initialized) {
-      cost.freeCudaMem();
-      initialized = false;
-    }
+    // The controller owns the CUDA lifecycle of the model, cost, feedback controller, and
+    // sampler. Destroy it before a subsequent setup() mutates or reallocates those shared
+    // objects; otherwise replacing controller after setup can let the old controller free the
+    // new controller's allocations.
+    controller.reset();
+    initialized = false;
   }
 };
 
@@ -785,6 +875,19 @@ void FirstOrderDubinsMppiInterface::setRuntimeOptions(
     options.ignore_obstacles, options.ignore_drivable_area, options.force_cold_start_each_step,
     options.skip_if_invalid, options.use_last_control_as_nominal);
 }
+
+void FirstOrderDubinsMppiInterface::setLastAppliedSteerCommand(const float last_cmd)
+{
+  if (!impl_) {
+    throw std::runtime_error("FirstOrderDubinsMppiInterface implementation is missing");
+  }
+  if (std::isfinite(last_cmd)) {
+    impl_->pending_last_applied_steer_cmd = last_cmd;
+  } else {
+    impl_->pending_last_applied_steer_cmd.reset();
+  }
+}
+
 void FirstOrderDubinsMppiInterface::setDebugTrajectoryLogging(
   const bool enable, const std::string & directory)
 {
@@ -823,6 +926,42 @@ void FirstOrderDubinsMppiInterface::setRolloutVisualizationEnabled(const bool en
     return;
   }
   impl_->enable_rollout_visualization = enable;
+}
+
+void FirstOrderDubinsMppiInterface::setForcedNominalControl(
+  const std::vector<float> & accel_cmd, const std::vector<float> & steer_cmd)
+{
+  if (!impl_) {
+    throw std::runtime_error("FirstOrderDubinsMppiInterface implementation is missing");
+  }
+  impl_->forced_nominal_accel = accel_cmd;
+  impl_->forced_nominal_steer = steer_cmd;
+  impl_->forced_nominal_pending = !accel_cmd.empty() || !steer_cmd.empty();
+}
+
+bool FirstOrderDubinsMppiInterface::copyLastOptimizedControl(
+  std::vector<float> & accel_cmd, std::vector<float> & steer_cmd) const
+{
+  accel_cmd.clear();
+  steer_cmd.clear();
+  if (!impl_ || !impl_->controller || !impl_->initialized) {
+    return false;
+  }
+  const Mppi::control_trajectory u_opt = impl_->controller->getControlSeq();
+  const int n = static_cast<int>(u_opt.cols());
+  if (n <= 0) {
+    return false;
+  }
+  const int accel_idx =
+    static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::ACCELERATION_CMD);
+  const int steer_idx = static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::STEER_CMD);
+  accel_cmd.resize(static_cast<size_t>(n));
+  steer_cmd.resize(static_cast<size_t>(n));
+  for (int t = 0; t < n; ++t) {
+    accel_cmd[static_cast<size_t>(t)] = u_opt(accel_idx, t);
+    steer_cmd[static_cast<size_t>(t)] = u_opt(steer_idx, t);
+  }
+  return true;
 }
 
 bool FirstOrderDubinsMppiInterface::copySampleCostDistribution(
@@ -864,8 +1003,12 @@ FirstOrderDubinsMppiControl FirstOrderDubinsMppiInterface::computeStep(
   }
 
   fromHostState(impl_->x, state);
+  const float measured_steering =
+    impl_->x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::STEER_ANGLE));
+  impl_->prepareSteeringSmoothnessBoundary(measured_steering);
   impl_->sim_time = sim_time;
   const FirstOrderDubinsMppiControl control = impl_->runStep();
+  impl_->pending_last_applied_steer_cmd = control.steer_cmd;
   state = toHostState(impl_->x);
   // Advance the vendor control history after the applied command is consumed so the
   // next cycle's Savitzky-Golay left-edge taps are the previously applied controls.
@@ -885,8 +1028,9 @@ FirstOrderDubinsMppiOptimizationResult FirstOrderDubinsMppiInterface::optimizeTr
   }
   FirstOrderDubinsMppiOptimizationResult result;
   const auto not_enough_input_points = input.points.size() < 2U;
-  const auto optimization_required = is_optimization_required(input);
+  const auto optimization_required = detail::isOptimizationRequired(input);
   if (not_enough_input_points || !optimization_required) {
+    impl_->pending_last_applied_steer_cmd.reset();
     RCLCPP_WARN(
       mppiLogger(), "MPPI skipped: %s",
       not_enough_input_points ? "trajectory has fewer than 2 points"
@@ -895,6 +1039,7 @@ FirstOrderDubinsMppiOptimizationResult FirstOrderDubinsMppiInterface::optimizeTr
     result.trajectory = input;
     result.debug.reference_trajectory = input;
     result.debug.optimized_trajectory = input;
+    result.debug.was_rejected = true;
     return result;
   }
 
@@ -908,8 +1053,6 @@ FirstOrderDubinsMppiOptimizationResult FirstOrderDubinsMppiInterface::optimizeTr
 
   const auto state_trajectory = impl_->controller->getActualStateSeq();
   const Mppi::control_trajectory u_opt_traj = impl_->controller->getControlSeq();
-  Trajectory output = input;
-
   const int pos_x_idx = static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::POS_X);
   const int pos_y_idx = static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::POS_Y);
   const int yaw_idx = static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::YAW);
@@ -931,7 +1074,7 @@ FirstOrderDubinsMppiOptimizationResult FirstOrderDubinsMppiInterface::optimizeTr
   const int n_state = static_cast<int>(state_trajectory.cols());
   const int n_ctrl = static_cast<int>(u_opt_traj.cols());
   const size_t num_points = std::min(
-    {output.points.size(), static_cast<size_t>(std::max(0, n_state)),
+    {input.points.size(), static_cast<size_t>(std::max(0, n_state)),
      static_cast<size_t>(std::max(0, n_ctrl))});
 
   DYN::state_array x_final = DYN::state_array::Zero();
@@ -946,60 +1089,54 @@ FirstOrderDubinsMppiOptimizationResult FirstOrderDubinsMppiInterface::optimizeTr
       x_tail, x_final, x_final_dot, u_tail, y_final, static_cast<float>(n_state - 1), kDt);
   }
 
-  float max_pos_delta = 0.0F;
-  float max_vel_delta = 0.0F;
-  int crash_status = 0;
-  size_t i = 0;
-  for (auto & out_point : output.points) {
-    if (i >= num_points) {
-      break;
-    }
-    const auto & in_point = input.points[i];
+  std::vector<detail::OptimizedState> optimized_states;
+  std::vector<FirstOrderDubinsMppiControl> optimized_controls;
+  optimized_states.reserve(num_points);
+  optimized_controls.reserve(num_points);
+  for (size_t i = 0; i < num_points; ++i) {
     const int control_col = static_cast<int>(i);
     const bool use_final = (control_col + 1 >= n_state) && have_final_state;
-
-    const float tracked_x =
-      use_final ? x_final(pos_x_idx) : state_trajectory(pos_x_idx, control_col + 1);
-    const float tracked_y =
-      use_final ? x_final(pos_y_idx) : state_trajectory(pos_y_idx, control_col + 1);
-    const float tracked_yaw =
-      use_final ? x_final(yaw_idx) : state_trajectory(yaw_idx, control_col + 1);
-    const float tracked_v =
-      use_final ? x_final(vel_x_idx) : state_trajectory(vel_x_idx, control_col + 1);
-    const float tracked_steer =
+    detail::OptimizedState state;
+    state.x = use_final ? x_final(pos_x_idx) : state_trajectory(pos_x_idx, control_col + 1);
+    state.y = use_final ? x_final(pos_y_idx) : state_trajectory(pos_y_idx, control_col + 1);
+    state.yaw = use_final ? x_final(yaw_idx) : state_trajectory(yaw_idx, control_col + 1);
+    state.velocity = use_final ? x_final(vel_x_idx) : state_trajectory(vel_x_idx, control_col + 1);
+    state.steering =
       use_final ? x_final(steer_x_idx) : state_trajectory(steer_x_idx, control_col + 1);
+    optimized_states.push_back(state);
+    FirstOrderDubinsMppiControl optimized_control;
+    optimized_control.accel_cmd = u_opt_traj(accel_cmd_idx, control_col);
+    optimized_control.steer_cmd = u_opt_traj(steer_cmd_idx, control_col);
+    optimized_controls.push_back(optimized_control);
+  }
 
-    if (impl_->skip_if_invalid && crash_status == 0) {
-      (void)impl_->cost.detectAndLatchCrash(
-        tracked_x, tracked_y, tracked_yaw, control_col, &crash_status);
-    }
-
+  Trajectory output = detail::buildOptimizedTrajectory(input, optimized_states, optimized_controls);
+  const auto validation = detail::validateOptimizedTrajectory(impl_->cost, optimized_states);
+  float max_pos_delta = 0.0F;
+  float max_vel_delta = 0.0F;
+  for (size_t i = 0; i < optimized_states.size(); ++i) {
+    const auto & state = optimized_states[i];
+    const auto & in_point = input.points[i];
     const float ref_x = static_cast<float>(in_point.pose.position.x);
     const float ref_y = static_cast<float>(in_point.pose.position.y);
     const float ref_v = in_point.longitudinal_velocity_mps;
-
-    max_pos_delta = std::max(max_pos_delta, std::hypot(tracked_x - ref_x, tracked_y - ref_y));
-    max_vel_delta = std::max(max_vel_delta, std::abs(tracked_v - ref_v));
-
-    out_point.pose.position.x = tracked_x;
-    out_point.pose.position.y = tracked_y;
-    out_point.pose.position.z = in_point.pose.position.z;
-    out_point.pose.orientation = quaternionFromYaw(tracked_yaw);
-    out_point.longitudinal_velocity_mps = tracked_v;
-    out_point.acceleration_mps2 = u_opt_traj(accel_cmd_idx, control_col);
-    out_point.front_wheel_angle_rad = tracked_steer;
-    ++i;
+    max_pos_delta = std::max(max_pos_delta, std::hypot(state.x - ref_x, state.y - ref_y));
+    max_vel_delta = std::max(max_vel_delta, std::abs(state.velocity - ref_v));
   }
 
   const auto elapsed_ms =
     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_time)
       .count();
 
-  set_initial_engage_velocity(output);
+  detail::setInitialEngageVelocity(output);
 
   result.trajectory = output;
   result.debug.reference_trajectory = input;
   result.debug.optimized_trajectory = output;
+  result.debug.validation = validation;
+  result.debug.iteration_diagnostics = impl_->iteration_diagnostics;
+  buildSteeringStepCostBreakdown(
+    impl_->model, impl_->cost, x_at_optimization, u_opt_traj, result.debug.steering_step_costs);
   if (impl_->enable_rollout_visualization) {
     buildRolloutVisualization(
       *impl_->controller, impl_->sampler, impl_->model, x_at_optimization,
@@ -1018,10 +1155,12 @@ FirstOrderDubinsMppiOptimizationResult FirstOrderDubinsMppiInterface::optimizeTr
   ego.v = odometry.twist.twist.linear.x;
   ego.accel = longitudinalAccelerationMps2(acceleration);
   ego.steer = steeringTireAngleRad(steering_status);
+  ego.last_applied_steer_cmd = impl_->resolved_last_applied_steer_cmd;
   impl_->debug_trajectory_logger.writeParamsOnce(impl_->user_cost_params_, impl_->vehicle_params);
   impl_->debug_trajectory_logger.logFrame(
     result.debug.reference_trajectory, result.debug.optimized_trajectory, ego,
-    result.debug.baseline_cost);
+    result.debug.baseline_cost, impl_->logged_nominal_accel, impl_->logged_nominal_steer,
+    result.debug.iteration_diagnostics, result.debug.steering_step_costs);
 
   RCLCPP_INFO(
     mppiLogger(),
@@ -1035,14 +1174,16 @@ FirstOrderDubinsMppiOptimizationResult FirstOrderDubinsMppiInterface::optimizeTr
     drivable_area.size(), control.accel_cmd, control.steer_cmd, result.debug.baseline_cost,
     max_pos_delta, max_vel_delta);
 
-  if (impl_->skip_if_invalid && crash_status != 0) {
+  if (impl_->skip_if_invalid && !validation.isValid()) {
     result.trajectory = input;
     result.debug.reference_trajectory = input;
     result.debug.optimized_trajectory = input;
+    result.debug.was_rejected = true;
     RCLCPP_WARN(
       mppiLogger(),
-      "MPPI output rejected with crash_status=%d; returning the input trajectory unchanged",
-      crash_status);
+      "MPPI output rejected with invalidity_mask=%u at point=%zu; returning the input trajectory "
+      "unchanged",
+      static_cast<unsigned int>(validation.reasons), validation.first_invalid_index.value());
   }
 
   // Advance the vendor control history after all getControlSeq / getActualStateSeq reads

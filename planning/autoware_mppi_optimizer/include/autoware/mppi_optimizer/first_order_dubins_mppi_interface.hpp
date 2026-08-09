@@ -25,6 +25,8 @@
 #include <geometry_msgs/msg/accel_with_covariance_stamped.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -52,10 +54,61 @@ struct FirstOrderDubinsMppiControl
   float steer_cmd{0.0F};
 };
 
+struct MppiIterationDiagnostics
+{
+  std::vector<float> ess_per_iteration;         // Size M (one value per optimization iteration).
+  std::vector<float> max_weight_per_iteration;  // Size M (one value per optimization iteration).
+  float min_ess{0.0F};
+  float max_weight{0.0F};
+  int min_ess_iteration_index{-1};
+};
+
+struct MppiSteeringStepCostBreakdown
+{
+  float steer_rate_l2_cost{0.0F};
+  float cmd_slew_cost{0.0F};
+  float steer_accel_cost{0.0F};
+};
+
 struct FirstOrderDubinsMppiRollout
 {
   std::vector<std::pair<float, float>> points;
   float cost{0.0F};
+  /** True when this sample was selected as a high-cost (worst) viz sample, not top-weighted. */
+  bool is_worst{false};
+};
+
+enum class FirstOrderDubinsMppiInvalidityReason : std::uint8_t {
+  none = 0U,
+  lateral_boundary = 1U << 0U,
+  obstacle = 1U << 1U,
+  road_border = 1U << 2U,
+};
+
+constexpr FirstOrderDubinsMppiInvalidityReason operator|(
+  const FirstOrderDubinsMppiInvalidityReason lhs, const FirstOrderDubinsMppiInvalidityReason rhs)
+{
+  return static_cast<FirstOrderDubinsMppiInvalidityReason>(
+    static_cast<std::uint8_t>(lhs) | static_cast<std::uint8_t>(rhs));
+}
+
+constexpr bool hasInvalidityReason(
+  const FirstOrderDubinsMppiInvalidityReason reasons,
+  const FirstOrderDubinsMppiInvalidityReason reason)
+{
+  return (static_cast<std::uint8_t>(reasons) & static_cast<std::uint8_t>(reason)) != 0U;
+}
+
+struct FirstOrderDubinsMppiValidationResult
+{
+  /** Reasons detected at the first invalid trajectory point. */
+  FirstOrderDubinsMppiInvalidityReason reasons{FirstOrderDubinsMppiInvalidityReason::none};
+  std::optional<std::size_t> first_invalid_index;
+
+  [[nodiscard]] bool isValid() const
+  {
+    return reasons == FirstOrderDubinsMppiInvalidityReason::none;
+  }
 };
 
 struct FirstOrderDubinsMppiDebug
@@ -65,6 +118,14 @@ struct FirstOrderDubinsMppiDebug
   std::vector<std::pair<float, float>> optimal_horizon;
   std::vector<FirstOrderDubinsMppiRollout> rollouts;
   float baseline_cost{0.0F};
+  /** Importance-weight diagnostics for every optimization iteration in this solve. */
+  MppiIterationDiagnostics iteration_diagnostics;
+  /** Steering smoothness components along the optimized control horizon. */
+  std::vector<MppiSteeringStepCostBreakdown> steering_step_costs;
+  /** Hard-constraint validation of the generated post-step states. */
+  FirstOrderDubinsMppiValidationResult validation;
+  /** True when skip_if_invalid replaced the optimized trajectory with the input trajectory. */
+  bool was_rejected{false};
 };
 
 struct FirstOrderDubinsMppiOptimizationResult
@@ -113,6 +174,14 @@ public:
   void setRuntimeOptions(const FirstOrderDubinsMppiRuntimeOptions & options);
 
   /**
+   * @brief Supply the downstream controller's last applied steering command for the next solve.
+   *
+   * This value is consumed once. If it is not supplied again before a later solve, that solve
+   * falls back to the measured steering state so a stale command cannot cross callback boundaries.
+   */
+  void setLastAppliedSteerCommand(float last_cmd);
+
+  /**
    * @brief Optionally write reference/optimized trajectories for offline viz.
    * @param enable When true, each optimizeTrajectory writes CSVs under directory.
    * @param directory Output folder (created if missing). Ignored when enable is false.
@@ -140,10 +209,27 @@ public:
 
   /**
    * @brief When true, optimizeTrajectory fills debug.rollouts with top-K weighted samples
-   *        (CPU replay; ~tens of ms). Enable only for offline retune — leave false for online
-   *        planning and debug trajectory logging.
+   *        plus worst-K high-cost samples (CPU replay; ~tens of ms). Enable only for offline
+   *        retune — leave false for online planning and debug trajectory logging.
    */
   void setRolloutVisualizationEnabled(bool enable);
+
+  /**
+   * @brief Force the next optimizeTrajectory / seedNominalControl to use this horizon as u_nom
+   *        (offline retune replay of logged NNNNNN_nominal.csv). Cleared after one use.
+   *        Sequences are truncated/padded to the MPPI horizon; values are clamped to vehicle
+   * limits.
+   */
+  void setForcedNominalControl(
+    const std::vector<float> & accel_cmd, const std::vector<float> & steer_cmd);
+
+  /**
+   * @brief Copy the last optimized control sequence (after optimizeTrajectory / computeStep).
+   *        Used by offline retune to warm-start a subsequent MPPI pass (Re-seed).
+   * @return false if the controller has not produced a control sequence yet.
+   */
+  bool copyLastOptimizedControl(
+    std::vector<float> & accel_cmd, std::vector<float> & steer_cmd) const;
 
   /**
    * @brief Run one MPPI control step and propagate the vehicle state forward.

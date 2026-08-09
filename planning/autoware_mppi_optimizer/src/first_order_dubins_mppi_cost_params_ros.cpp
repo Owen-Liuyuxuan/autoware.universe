@@ -32,7 +32,6 @@ void declare_first_order_dubins_mppi_cost_params(rclcpp::Node & node, const std:
 {
   const FirstOrderDubinsMppiCostParams defaults;
   node.declare_parameter(param_name(prefix, "lambda"), defaults.lambda);
-  node.declare_parameter(param_name(prefix, "desired_speed"), defaults.desired_speed);
   node.declare_parameter(param_name(prefix, "speed_coeff"), defaults.speed_coeff);
   node.declare_parameter(param_name(prefix, "track_coeff"), defaults.track_coeff);
   node.declare_parameter(param_name(prefix, "track_terminal_scale"), defaults.track_terminal_scale);
@@ -43,13 +42,15 @@ void declare_first_order_dubins_mppi_cost_params(rclcpp::Node & node, const std:
     param_name(prefix, "lateral_yaw_error_coeff"), defaults.lateral_yaw_error_coeff);
   node.declare_parameter(param_name(prefix, "crash_coeff"), defaults.crash_coeff);
   node.declare_parameter(param_name(prefix, "boundary_threshold"), defaults.boundary_threshold);
-  node.declare_parameter(
-    param_name(prefix, "boundary_threshold_left"), defaults.boundary_threshold_left);
-  node.declare_parameter(
-    param_name(prefix, "boundary_threshold_right"), defaults.boundary_threshold_right);
   node.declare_parameter(param_name(prefix, "accel_cmd_coeff"), defaults.accel_cmd_coeff);
   node.declare_parameter(param_name(prefix, "steer_cmd_coeff"), defaults.steer_cmd_coeff);
   node.declare_parameter(param_name(prefix, "steer_rate_coeff"), defaults.steer_rate_coeff);
+  node.declare_parameter(param_name(prefix, "steer_rate_l2_coeff"), defaults.steer_rate_l2_coeff);
+  node.declare_parameter(param_name(prefix, "steer_accel_coeff"), defaults.steer_accel_coeff);
+  node.declare_parameter(param_name(prefix, "cmd_slew_coeff"), defaults.cmd_slew_coeff);
+  node.declare_parameter(
+    param_name(prefix, "nominal_curvature_min_chord_length_m"),
+    defaults.nominal_curvature_min_chord_length_m);
   node.declare_parameter(
     param_name(prefix, "lateral_acceleration_coeff"), defaults.lateral_acceleration_coeff);
   node.declare_parameter(param_name(prefix, "lateral_jerk_coeff"), defaults.lateral_jerk_coeff);
@@ -61,6 +62,10 @@ void declare_first_order_dubins_mppi_cost_params(rclcpp::Node & node, const std:
     param_name(prefix, "road_border_collision_margin"), defaults.road_border_collision_margin);
   node.declare_parameter(
     param_name(prefix, "drivable_area_crossing_coeff"), defaults.drivable_area_crossing_coeff);
+  node.declare_parameter(param_name(prefix, "goal_pos_coeff"), defaults.goal_pos_coeff);
+  node.declare_parameter(param_name(prefix, "goal_speed_coeff"), defaults.goal_speed_coeff);
+  node.declare_parameter(param_name(prefix, "goal_yaw_coeff"), defaults.goal_yaw_coeff);
+  node.declare_parameter(param_name(prefix, "goal_terminal_scale"), defaults.goal_terminal_scale);
 }
 
 FirstOrderDubinsMppiCostParams get_first_order_dubins_mppi_cost_params(
@@ -68,8 +73,6 @@ FirstOrderDubinsMppiCostParams get_first_order_dubins_mppi_cost_params(
 {
   FirstOrderDubinsMppiCostParams params;
   params.lambda = static_cast<float>(node.get_parameter(param_name(prefix, "lambda")).as_double());
-  params.desired_speed =
-    static_cast<float>(node.get_parameter(param_name(prefix, "desired_speed")).as_double());
   params.speed_coeff =
     static_cast<float>(node.get_parameter(param_name(prefix, "speed_coeff")).as_double());
   params.track_coeff =
@@ -86,16 +89,20 @@ FirstOrderDubinsMppiCostParams get_first_order_dubins_mppi_cost_params(
     static_cast<float>(node.get_parameter(param_name(prefix, "crash_coeff")).as_double());
   params.boundary_threshold =
     static_cast<float>(node.get_parameter(param_name(prefix, "boundary_threshold")).as_double());
-  params.boundary_threshold_left = static_cast<float>(
-    node.get_parameter(param_name(prefix, "boundary_threshold_left")).as_double());
-  params.boundary_threshold_right = static_cast<float>(
-    node.get_parameter(param_name(prefix, "boundary_threshold_right")).as_double());
   params.accel_cmd_coeff =
     static_cast<float>(node.get_parameter(param_name(prefix, "accel_cmd_coeff")).as_double());
   params.steer_cmd_coeff =
     static_cast<float>(node.get_parameter(param_name(prefix, "steer_cmd_coeff")).as_double());
   params.steer_rate_coeff =
     static_cast<float>(node.get_parameter(param_name(prefix, "steer_rate_coeff")).as_double());
+  params.steer_rate_l2_coeff =
+    static_cast<float>(node.get_parameter(param_name(prefix, "steer_rate_l2_coeff")).as_double());
+  params.steer_accel_coeff =
+    static_cast<float>(node.get_parameter(param_name(prefix, "steer_accel_coeff")).as_double());
+  params.cmd_slew_coeff =
+    static_cast<float>(node.get_parameter(param_name(prefix, "cmd_slew_coeff")).as_double());
+  params.nominal_curvature_min_chord_length_m = static_cast<float>(
+    node.get_parameter(param_name(prefix, "nominal_curvature_min_chord_length_m")).as_double());
   params.lateral_acceleration_coeff = static_cast<float>(
     node.get_parameter(param_name(prefix, "lateral_acceleration_coeff")).as_double());
   params.lateral_jerk_coeff =
@@ -108,6 +115,14 @@ FirstOrderDubinsMppiCostParams get_first_order_dubins_mppi_cost_params(
     node.get_parameter(param_name(prefix, "road_border_collision_margin")).as_double());
   params.drivable_area_crossing_coeff = static_cast<float>(
     node.get_parameter(param_name(prefix, "drivable_area_crossing_coeff")).as_double());
+  params.goal_pos_coeff =
+    static_cast<float>(node.get_parameter(param_name(prefix, "goal_pos_coeff")).as_double());
+  params.goal_speed_coeff =
+    static_cast<float>(node.get_parameter(param_name(prefix, "goal_speed_coeff")).as_double());
+  params.goal_yaw_coeff =
+    static_cast<float>(node.get_parameter(param_name(prefix, "goal_yaw_coeff")).as_double());
+  params.goal_terminal_scale =
+    static_cast<float>(node.get_parameter(param_name(prefix, "goal_terminal_scale")).as_double());
   return params;
 }
 

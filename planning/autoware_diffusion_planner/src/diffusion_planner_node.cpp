@@ -16,6 +16,7 @@
 
 #include "autoware/diffusion_planner/constants.hpp"
 #include "autoware/diffusion_planner/dimensions.hpp"
+#include "autoware/diffusion_planner/mppi_utils.hpp"
 #include "autoware/diffusion_planner/preprocessing/preprocessing_utils.hpp"
 #include "autoware/diffusion_planner/utils/marker_utils.hpp"
 #include "autoware/diffusion_planner/utils/utils.hpp"
@@ -29,6 +30,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <fstream>
 #include <functional>
@@ -635,8 +637,9 @@ void DiffusionPlanner::on_timer()
     stop_watch_ptr_->tic("mppi_optimizer");
     if (!mppi_optimizer_ || prev_route_.header.stamp != core_->get_route()->header.stamp) {
       mppi_optimizer_ = std::make_unique<autoware::mppi_optimizer::FirstOrderDubinsMppiInterface>();
-      mppi_optimizer_->setCostParams(
-        autoware::mppi_optimizer::get_first_order_dubins_mppi_cost_params(*this));
+      const auto cost_params =
+        autoware::mppi_optimizer::get_first_order_dubins_mppi_cost_params(*this);
+      mppi_optimizer_->setCostParams(cost_params);
       mppi_optimizer_->setVehicleParams(
         autoware::mppi_optimizer::get_first_order_dubins_mppi_vehicle_params(*this));
       mppi_optimizer_->setRuntimeOptions(
@@ -646,10 +649,13 @@ void DiffusionPlanner::on_timer()
         std::make_shared<autoware::avoidance_target_detector::ExtendedRouteHandler>(
           lanelet_map_msg_, prev_route_);
       extended_route_handler_->create_map();
-      const auto road_borders = extended_route_handler_->get_road_borders();
-      road_border_rtree_ = prepare_road_border_rtree(road_borders);
-      drivable_area_rtree_ =
-        prepare_drivable_area_rtree(extended_route_handler_->get_extended_route_bounds());
+      const double max_longitudinal_offset = std::max(
+        std::abs(vehicle_info_.min_longitudinal_offset_m),
+        std::abs(vehicle_info_.max_longitudinal_offset_m));
+      const double max_lateral_offset = std::max(
+        std::abs(vehicle_info_.min_lateral_offset_m), std::abs(vehicle_info_.max_lateral_offset_m));
+      mppi_object_filter_margin_m_ =
+        std::hypot(max_longitudinal_offset, max_lateral_offset) + cost_params.boundary_threshold;
     }
 
     try {
@@ -662,25 +668,30 @@ void DiffusionPlanner::on_timer()
       const std::optional<SteeringReport> ego_steering =
         steering_status ? std::make_optional(*steering_status) : std::nullopt;
 
+      const auto objects_in_range = autoware::avoidance_target_detector::filter_objects_in_range(
+        *objects, planner_output.trajectory, mppi_object_filter_margin_m_);
       object_selector_.update_objects(
-        now(), *objects, planner_output.trajectory, *extended_route_handler_);
+        now(), objects_in_range, planner_output.trajectory, *extended_route_handler_);
       auto avoidance_targets = object_selector_.get_avoidance_targets(
-        *objects, planner_output.trajectory, extended_route_handler_->get_extended_route_bounds());
-      const auto driving_along_targets = object_selector_.get_driving_along_vehicles(*objects);
+        objects_in_range, planner_output.trajectory,
+        extended_route_handler_->get_extended_route_bounds());
+      const auto driving_along_targets =
+        object_selector_.get_driving_along_vehicles(objects_in_range);
 
       const auto margin = vehicle_info_.max_longitudinal_offset_m + 1.0;
-      const auto road_borders_subset =
-        get_road_border_subset(road_border_rtree_, planner_output.trajectory, margin);
-      const auto drivable_area_subset =
-        get_drivable_area_subset(drivable_area_rtree_, planner_output.trajectory, margin);
 
       auto all_targets = avoidance_targets;
       all_targets.objects.insert(
         all_targets.objects.end(), driving_along_targets.objects.begin(),
         driving_along_targets.objects.end());
+      const auto road_borders_subset = extended_route_handler_->get_road_borders_around_trajectory(
+        planner_output.trajectory, margin);
+      const auto drivable_area_subset =
+        extended_route_handler_->get_drivable_area_around_trajectory(
+          planner_output.trajectory, margin);
       const auto mppi_result = mppi_optimizer_->optimizeTrajectory(
         planner_output.trajectory, frame_context->ego_kinematic_state, ego_acceleration_for_mppi,
-        ego_steering, avoidance_targets, to_mppi_segments(road_borders_subset),
+        ego_steering, all_targets, to_mppi_segments(road_borders_subset),
         to_mppi_segments(drivable_area_subset));
       pub_mppi_markers_->publish(
         autoware::mppi_optimizer::createMppiDebugMarkers(
@@ -688,7 +699,7 @@ void DiffusionPlanner::on_timer()
           driving_along_targets, frame_context->ego_kinematic_state.pose.pose.position.z));
       record_section_time(
         *stop_watch_ptr_, "mppi_optimizer/optimize_trajectory", *diagnostics_inference_);
-      const bool apply_mppi = !params_.shadow_mode;
+      const bool apply_mppi = !params_.shadow_mode && !mppi_result.debug.was_rejected;
       if (apply_mppi) {
         planner_output.trajectory = mppi_result.trajectory;
       }

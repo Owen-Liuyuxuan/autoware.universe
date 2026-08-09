@@ -16,6 +16,7 @@
 #define AUTOWARE__MPPI_OPTIMIZER__MPPI_DEBUG_TRAJECTORY_LOGGER_HPP_
 
 #include "autoware/mppi_optimizer/first_order_dubins_mppi_cost_params.hpp"
+#include "autoware/mppi_optimizer/first_order_dubins_mppi_interface.hpp"
 #include "autoware/mppi_optimizer/first_order_dubins_mppi_vehicle_params.hpp"
 
 #include <rclcpp/logging.hpp>
@@ -24,12 +25,14 @@
 
 #include <tf2/utils.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <vector>
 
 namespace autoware::mppi_optimizer
 {
@@ -56,6 +59,7 @@ struct MppiDebugEgoState
   double v{0.0};
   double accel{0.0};
   double steer{0.0};
+  double last_applied_steer_cmd{0.0};
 };
 
 /**
@@ -69,12 +73,21 @@ struct MppiDebugEgoState
  *   <log_dir>/000000_reference.csv
  *   <log_dir>/000000_optimized.csv
  *   <log_dir>/000000_ego.csv
+ *   <log_dir>/000000_nominal.csv   (u_nom accel/steer cmds used this cycle)
+ *   <log_dir>/000000_iteration_diagnostics.csv
+ *   <log_dir>/000000_steering_costs.csv
  *   ...
  *
  * Trajectory CSV columns:
  *   t_from_start_s,x,y,z,yaw,v,a,steer,steer_rate
  * Ego CSV columns:
- *   x,y,z,yaw,v,accel,steer
+ *   x,y,z,yaw,v,accel,steer,last_applied_steer_cmd
+ * Nominal CSV columns:
+ *   t_idx,accel_cmd,steer_cmd
+ * Iteration diagnostics CSV columns:
+ *   iteration,ess,max_normalized_weight
+ * Steering costs CSV columns:
+ *   timestep,steer_rate_l2_cost,cmd_slew_cost,steer_accel_cost
  */
 class MppiDebugTrajectoryLogger
 {
@@ -128,7 +141,6 @@ public:
         out << "key,value\n";
         out << std::setprecision(9) << std::fixed;
         out << "lambda," << cost.lambda << "\n";
-        out << "desired_speed," << cost.desired_speed << "\n";
         out << "speed_coeff," << cost.speed_coeff << "\n";
         out << "track_coeff," << cost.track_coeff << "\n";
         out << "track_terminal_scale," << cost.track_terminal_scale << "\n";
@@ -137,15 +149,20 @@ public:
         out << "lateral_yaw_error_coeff," << cost.lateral_yaw_error_coeff << "\n";
         out << "crash_coeff," << cost.crash_coeff << "\n";
         out << "boundary_threshold," << cost.boundary_threshold << "\n";
-        out << "boundary_threshold_left," << cost.boundary_threshold_left << "\n";
-        out << "boundary_threshold_right," << cost.boundary_threshold_right << "\n";
         out << "accel_cmd_coeff," << cost.accel_cmd_coeff << "\n";
         out << "steer_cmd_coeff," << cost.steer_cmd_coeff << "\n";
         out << "steer_rate_coeff," << cost.steer_rate_coeff << "\n";
+        out << "steer_rate_l2_coeff," << cost.steer_rate_l2_coeff << "\n";
+        out << "steer_accel_coeff," << cost.steer_accel_coeff << "\n";
+        out << "cmd_slew_coeff," << cost.cmd_slew_coeff << "\n";
+        out << "nominal_curvature_min_chord_length_m," << cost.nominal_curvature_min_chord_length_m
+            << "\n";
         out << "lateral_acceleration_coeff," << cost.lateral_acceleration_coeff << "\n";
         out << "lateral_jerk_coeff," << cost.lateral_jerk_coeff << "\n";
         out << "longitudinal_jerk_coeff," << cost.longitudinal_jerk_coeff << "\n";
         out << "obstacle_collision_margin," << cost.obstacle_collision_margin << "\n";
+        out << "road_border_collision_margin," << cost.road_border_collision_margin << "\n";
+        out << "drivable_area_crossing_coeff," << cost.drivable_area_crossing_coeff << "\n";
       }
     }
     {
@@ -172,7 +189,10 @@ public:
   void logFrame(
     const autoware_planning_msgs::msg::Trajectory & reference,
     const autoware_planning_msgs::msg::Trajectory & optimized, const MppiDebugEgoState & ego,
-    const double baseline_cost = 0.0)
+    const double baseline_cost = 0.0, const std::vector<float> & nominal_accel_cmd = {},
+    const std::vector<float> & nominal_steer_cmd = {},
+    const MppiIterationDiagnostics & iteration_diagnostics = {},
+    const std::vector<MppiSteeringStepCostBreakdown> & steering_step_costs = {})
   {
     if (!enabled_) {
       return;
@@ -183,10 +203,31 @@ public:
     const std::string ref_path = directory_ + "/" + frame_tag + "_reference.csv";
     const std::string opt_path = directory_ + "/" + frame_tag + "_optimized.csv";
     const std::string ego_path = directory_ + "/" + frame_tag + "_ego.csv";
+    const std::string nominal_path = directory_ + "/" + frame_tag + "_nominal.csv";
+    const std::string iteration_diagnostics_path =
+      directory_ + "/" + frame_tag + "_iteration_diagnostics.csv";
+    const std::string steering_costs_path = directory_ + "/" + frame_tag + "_steering_costs.csv";
     if (
       !writeTrajectoryCsv(ref_path, reference) || !writeTrajectoryCsv(opt_path, optimized) ||
       !writeEgoCsv(ego_path, ego)) {
       return;
+    }
+    if (!nominal_accel_cmd.empty() || !nominal_steer_cmd.empty()) {
+      if (!writeNominalCsv(nominal_path, nominal_accel_cmd, nominal_steer_cmd)) {
+        return;
+      }
+    }
+    if (!steering_step_costs.empty()) {
+      if (!writeSteeringCostsCsv(steering_costs_path, steering_step_costs)) {
+        return;
+      }
+    }
+    if (
+      !iteration_diagnostics.ess_per_iteration.empty() ||
+      !iteration_diagnostics.max_weight_per_iteration.empty()) {
+      if (!writeIterationDiagnosticsCsv(iteration_diagnostics_path, iteration_diagnostics)) {
+        return;
+      }
     }
 
     const auto & stamp = reference.header.stamp.sec != 0 || reference.header.stamp.nanosec != 0
@@ -200,7 +241,10 @@ public:
       return;
     }
     index << frame_id_ << "," << stamp.sec << "," << stamp.nanosec << "," << baseline_cost << ","
-          << reference.points.size() << "," << optimized.points.size() << "\n";
+          << reference.points.size() << "," << optimized.points.size() << ","
+          << iteration_diagnostics.ess_per_iteration.size() << "," << iteration_diagnostics.min_ess
+          << "," << iteration_diagnostics.min_ess_iteration_index << ","
+          << iteration_diagnostics.max_weight << "\n";
     ++frame_id_;
   }
 
@@ -221,7 +265,8 @@ private:
     if (!std::filesystem::exists(index_path)) {
       std::ofstream index(index_path);
       if (index) {
-        index << "frame_id,stamp_sec,stamp_nsec,baseline_cost,n_reference,n_optimized\n";
+        index << "frame_id,stamp_sec,stamp_nsec,baseline_cost,n_reference,n_optimized,"
+                 "n_iterations,min_ess,min_ess_iteration_index,max_normalized_weight\n";
       }
     }
     index_initialized_ = true;
@@ -258,10 +303,74 @@ private:
         rclcpp::get_logger("mppi_debug_trajectory_logger"), "Failed to write %s", path.c_str());
       return false;
     }
-    out << "x,y,z,yaw,v,accel,steer\n";
+    out << "x,y,z,yaw,v,accel,steer,last_applied_steer_cmd\n";
     out << std::setprecision(9) << std::fixed;
     out << ego.x << "," << ego.y << "," << ego.z << "," << ego.yaw << "," << ego.v << ","
-        << ego.accel << "," << ego.steer << "\n";
+        << ego.accel << "," << ego.steer << "," << ego.last_applied_steer_cmd << "\n";
+    return true;
+  }
+
+  static bool writeNominalCsv(
+    const std::string & path, const std::vector<float> & accel_cmd,
+    const std::vector<float> & steer_cmd)
+  {
+    const size_t n = std::min(accel_cmd.size(), steer_cmd.size());
+    std::ofstream out(path);
+    if (!out) {
+      RCLCPP_ERROR(
+        rclcpp::get_logger("mppi_debug_trajectory_logger"), "Failed to write %s", path.c_str());
+      return false;
+    }
+    out << "t_idx,accel_cmd,steer_cmd\n";
+    out << std::setprecision(9) << std::fixed;
+    for (size_t i = 0; i < n; ++i) {
+      out << i << "," << accel_cmd[i] << "," << steer_cmd[i] << "\n";
+    }
+    return true;
+  }
+
+  static bool writeIterationDiagnosticsCsv(
+    const std::string & path, const MppiIterationDiagnostics & diagnostics)
+  {
+    if (diagnostics.ess_per_iteration.size() != diagnostics.max_weight_per_iteration.size()) {
+      RCLCPP_ERROR(
+        rclcpp::get_logger("mppi_debug_trajectory_logger"),
+        "Cannot write %s: ESS and maximum-weight history sizes differ", path.c_str());
+      return false;
+    }
+
+    std::ofstream out(path);
+    if (!out) {
+      RCLCPP_ERROR(
+        rclcpp::get_logger("mppi_debug_trajectory_logger"), "Failed to write %s", path.c_str());
+      return false;
+    }
+    out << "iteration,ess,max_normalized_weight\n";
+    out << std::setprecision(9) << std::fixed;
+    for (size_t i = 0; i < diagnostics.ess_per_iteration.size(); ++i) {
+      out << i << "," << diagnostics.ess_per_iteration[i] << ","
+          << diagnostics.max_weight_per_iteration[i] << "\n";
+    }
+    return true;
+  }
+
+  static bool writeSteeringCostsCsv(
+    const std::string & path,
+    const std::vector<MppiSteeringStepCostBreakdown> & steering_step_costs)
+  {
+    std::ofstream out(path);
+    if (!out) {
+      RCLCPP_ERROR(
+        rclcpp::get_logger("mppi_debug_trajectory_logger"), "Failed to write %s", path.c_str());
+      return false;
+    }
+    out << "timestep,steer_rate_l2_cost,cmd_slew_cost,steer_accel_cost\n";
+    out << std::setprecision(9) << std::fixed;
+    for (size_t i = 0; i < steering_step_costs.size(); ++i) {
+      const auto & costs = steering_step_costs[i];
+      out << i << "," << costs.steer_rate_l2_cost << "," << costs.cmd_slew_cost << ","
+          << costs.steer_accel_cost << "\n";
+    }
     return true;
   }
 

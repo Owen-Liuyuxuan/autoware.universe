@@ -83,6 +83,18 @@ void FirstOrderDubinsBicycleCostImpl<
 }
 
 template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
+void FirstOrderDubinsBicycleCostImpl<
+  CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>::setLastAppliedSteerCommand(const float last_cmd)
+{
+  last_applied_steer_cmd_ = last_cmd;
+  if (this->GPUMemStatus_) {
+    HANDLE_ERROR(cudaMemcpyAsync(
+      &this->cost_d_->last_applied_steer_cmd_, &last_applied_steer_cmd_,
+      sizeof(last_applied_steer_cmd_), cudaMemcpyHostToDevice, this->stream_));
+  }
+}
+
+template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
 void FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>::dataToDevice()
 {
   if (!this->GPUMemStatus_) {
@@ -97,6 +109,9 @@ void FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAM
     this->cost_d_->ref_v_, ref_v_, sizeof(ref_v_), cudaMemcpyHostToDevice, this->stream_));
   HANDLE_ERROR(cudaMemcpyAsync(
     this->cost_d_->ref_yaw_, ref_yaw_, sizeof(ref_yaw_), cudaMemcpyHostToDevice, this->stream_));
+  HANDLE_ERROR(cudaMemcpyAsync(
+    &this->cost_d_->last_applied_steer_cmd_, &last_applied_steer_cmd_,
+    sizeof(last_applied_steer_cmd_), cudaMemcpyHostToDevice, this->stream_));
   HANDLE_ERROR(cudaMemcpyAsync(
     &this->cost_d_->num_obstacles_, &num_obstacles_, sizeof(num_obstacles_), cudaMemcpyHostToDevice,
     this->stream_));
@@ -160,7 +175,7 @@ void FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAM
   for (int i = 0; i < n; ++i) {
     ref_x_[i] = x[i];
     ref_y_[i] = y[i];
-    ref_v_[i] = v != nullptr ? v[i] : this->params_.desired_speed;
+    ref_v_[i] = v[i];
     if (yaw != nullptr) {
       ref_yaw_[i] = yaw[i];
     } else if (i >= 1) {
@@ -177,7 +192,7 @@ void FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAM
     for (int i = n; i < NUM_TIMESTEPS; ++i) {
       ref_x_[i] = x[n - 1];
       ref_y_[i] = y[n - 1];
-      ref_v_[i] = v != nullptr ? v[n - 1] : this->params_.desired_speed;
+      ref_v_[i] = v[n - 1];
       ref_yaw_[i] = end_yaw;
     }
   }
@@ -336,6 +351,38 @@ __host__ __device__ float FirstOrderDubinsBicycleCostImpl<
 }
 
 template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
+__host__ __device__ float
+FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>::
+  computeLocalLateralDistanceValue(const float x, const float y, const int timestep) const
+{
+  if (NUM_TIMESTEPS <= 1) {
+    return vectorLength(x - ref_x_[0], y - ref_y_[0]);
+  }
+
+  constexpr int kWindowRadius = 3;
+  const int t = timestep < 0 ? 0 : (timestep >= NUM_TIMESTEPS ? NUM_TIMESTEPS - 1 : timestep);
+  const int last_segment_idx = NUM_TIMESTEPS - 2;
+  const int start_segment_idx = t > kWindowRadius ? t - kWindowRadius : 0;
+  const int end_segment_idx =
+    t + kWindowRadius < last_segment_idx ? t + kWindowRadius : last_segment_idx;
+
+  float min_distance = 1.0E8F;
+#ifdef __CUDA_ARCH__
+#pragma unroll
+#endif
+  for (int i = start_segment_idx; i <= end_segment_idx; ++i) {
+    const float segment_distance =
+      distancePointToSegment(x, y, ref_x_[i], ref_y_[i], ref_x_[i + 1], ref_y_[i + 1]);
+#ifdef __CUDA_ARCH__
+    min_distance = fminf(min_distance, segment_distance);
+#else
+    min_distance = std::min(min_distance, segment_distance);
+#endif
+  }
+  return min_distance;
+}
+
+template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
 __host__ __device__ float FirstOrderDubinsBicycleCostImpl<
   CLASS_T, NUM_TIMESTEPS, PARAMS_T,
   DYN_PARAMS_T>::computeLateralYawErrorValue(const float x, const float y, const float yaw) const
@@ -399,26 +446,9 @@ __host__ __device__ float FirstOrderDubinsBicycleCostImpl<
 template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
 __host__ __device__ bool FirstOrderDubinsBicycleCostImpl<
   CLASS_T, NUM_TIMESTEPS, PARAMS_T,
-  DYN_PARAMS_T>::exceedsLateralBoundary(const float x, const float y, int timestep) const
+  DYN_PARAMS_T>::exceedsLateralBoundary(const float x, const float y, const int timestep) const
 {
-  const bool asymmetric =
-    this->params_.boundary_threshold_left >= 0.0F || this->params_.boundary_threshold_right >= 0.0F;
-  const float signed_lat = computeSignedLateralOffset(x, y, timestep);
-  if (!asymmetric) {
-#ifdef __CUDA_ARCH__
-    return fabsf(signed_lat) >= this->params_.boundary_threshold;
-#else
-    return std::fabs(signed_lat) >= this->params_.boundary_threshold;
-#endif
-  }
-
-  const float left_limit = this->params_.boundary_threshold_left >= 0.0F
-                             ? this->params_.boundary_threshold_left
-                             : this->params_.boundary_threshold;
-  const float right_limit = this->params_.boundary_threshold_right >= 0.0F
-                              ? this->params_.boundary_threshold_right
-                              : this->params_.boundary_threshold;
-  return signed_lat > left_limit || signed_lat < -right_limit;
+  return computeLocalLateralDistanceValue(x, y, timestep) >= this->params_.boundary_threshold;
 }
 
 template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
@@ -554,7 +584,7 @@ FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>:
   const float x_pos = y[static_cast<int>(O::BASELINK_POS_I_X)];
   const float y_pos = y[static_cast<int>(O::BASELINK_POS_I_Y)];
   const float yaw = y[static_cast<int>(O::YAW)];
-  const float vel = y[static_cast<int>(O::TOTAL_VELOCITY)];
+  const float vel = y[static_cast<int>(O::BASELINK_VEL_B_X)];
 
   const float track_val = computeTrackValue(x_pos, y_pos, timestep);
   const float vel_diff = vel - ref_v_[timestep];
@@ -584,7 +614,7 @@ float FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARA
   const float x_pos = y[static_cast<int>(O::BASELINK_POS_I_X)];
   const float y_pos = y[static_cast<int>(O::BASELINK_POS_I_Y)];
   const float yaw = y[static_cast<int>(O::YAW)];
-  const float vel = y[static_cast<int>(O::TOTAL_VELOCITY)];
+  const float vel = y[static_cast<int>(O::BASELINK_VEL_B_X)];
 
   const float track_val = computeTrackValue(x_pos, y_pos, timestep);
   const float vel_diff = vel - ref_v_[timestep];
@@ -664,22 +694,50 @@ FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>:
 }
 
 template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
+__host__ __device__ SteeringSmoothnessCostTerms
+FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>::
+  computeSteeringSmoothnessCost(const float * u, const float * y, const int timestep) const
+{
+  const float steer_rate = y[static_cast<int>(O::STEER_RATE)];
+  const float previous_steer_rate = y[static_cast<int>(O::PREVIOUS_STEER_RATE)];
+  const float steer_cmd = u[static_cast<int>(C::STEER_CMD)];
+  const float previous_steer_cmd =
+    timestep == 0 ? last_applied_steer_cmd_ : y[static_cast<int>(O::PREVIOUS_STEER_COMMAND)];
+  // MPPI's horizon timestep is fixed at 0.1 s by first_order_dubins_mppi_interface.cu.
+  constexpr float kMppiTimeStep = 0.1F;
+  const float cmd_slew = (steer_cmd - previous_steer_cmd) / kMppiTimeStep;
+  const float steer_accel =
+    timestep == 0 ? 0.0F : (steer_rate - previous_steer_rate) / kMppiTimeStep;
+
+  SteeringSmoothnessCostTerms terms;
+  terms.steer_rate_l2_cost = this->params_.steer_rate_l2_coeff * steer_rate * steer_rate;
+  terms.cmd_slew_cost = this->params_.cmd_slew_coeff * cmd_slew * cmd_slew;
+  terms.steer_accel_cost = this->params_.steer_accel_coeff * steer_accel * steer_accel;
+  return terms;
+}
+
+template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
 float FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>::
   computeComfortCost(
     const Eigen::Ref<const control_array> & u, const Eigen::Ref<const output_array> & y,
     int timestep)
 {
-  (void)timestep;
   float lateral_accel = 0.0F;
   float lateral_jerk = 0.0F;
   float longitudinal_jerk = 0.0F;
   float steer_rate = 0.0F;
   comfortTerms(
     this->params_, u.data(), y.data(), lateral_accel, lateral_jerk, longitudinal_jerk, steer_rate);
-  return this->params_.lateral_acceleration_coeff * std::abs(lateral_accel) +
-         this->params_.lateral_jerk_coeff * std::abs(lateral_jerk) +
-         this->params_.longitudinal_jerk_coeff * std::abs(longitudinal_jerk) +
-         this->params_.steer_rate_coeff * std::abs(steer_rate);
+  const float legacy_cost = this->params_.lateral_acceleration_coeff * std::abs(lateral_accel) +
+                            this->params_.lateral_jerk_coeff * std::abs(lateral_jerk) +
+                            this->params_.longitudinal_jerk_coeff * std::abs(longitudinal_jerk) +
+                            this->params_.steer_rate_coeff * std::abs(steer_rate);
+  if (
+    this->params_.steer_rate_l2_coeff == 0.0F && this->params_.steer_accel_coeff == 0.0F &&
+    this->params_.cmd_slew_coeff == 0.0F) {
+    return legacy_cost;
+  }
+  return legacy_cost + computeSteeringSmoothnessCost(u.data(), y.data(), timestep).total();
 }
 
 template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
@@ -687,16 +745,21 @@ __device__ float
 FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>::computeComfortCost(
   float * u, float * y, int timestep)
 {
-  (void)timestep;
   float lateral_accel = 0.0F;
   float lateral_jerk = 0.0F;
   float longitudinal_jerk = 0.0F;
   float steer_rate = 0.0F;
   comfortTerms(this->params_, u, y, lateral_accel, lateral_jerk, longitudinal_jerk, steer_rate);
-  return this->params_.lateral_acceleration_coeff * fabsf(lateral_accel) +
-         this->params_.lateral_jerk_coeff * fabsf(lateral_jerk) +
-         this->params_.longitudinal_jerk_coeff * fabsf(longitudinal_jerk) +
-         this->params_.steer_rate_coeff * fabsf(steer_rate);
+  const float legacy_cost = this->params_.lateral_acceleration_coeff * fabsf(lateral_accel) +
+                            this->params_.lateral_jerk_coeff * fabsf(lateral_jerk) +
+                            this->params_.longitudinal_jerk_coeff * fabsf(longitudinal_jerk) +
+                            this->params_.steer_rate_coeff * fabsf(steer_rate);
+  if (
+    this->params_.steer_rate_l2_coeff == 0.0F && this->params_.steer_accel_coeff == 0.0F &&
+    this->params_.cmd_slew_coeff == 0.0F) {
+    return legacy_cost;
+  }
+  return legacy_cost + computeSteeringSmoothnessCost(u, y, timestep).total();
 }
 
 template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>

@@ -18,13 +18,11 @@
 namespace autoware::mppi_optimizer
 {
 
-/** Host-side cost weights; defaults match first_order_dubins_bicycle_cost.cuh and
- * mppi_optimizer.param.yaml */
+/** Host-side MPPI tunables; defaults match mppi_optimizer.param.yaml. */
 struct FirstOrderDubinsMppiCostParams
 {
   /** Softmax temperature for trajectory weighting (higher = softer weighting). */
   float lambda{1500.0F};
-  float desired_speed{3.0F};
   float speed_coeff{500.0F};
   float track_coeff{1000.0F};
   float track_terminal_scale{10.0F};
@@ -33,18 +31,24 @@ struct FirstOrderDubinsMppiCostParams
   float lateral_yaw_error_coeff{0.0F};
   float crash_coeff{100000.0F};
   float boundary_threshold{1.5F};
-  float boundary_threshold_left{-1.0F};
-  float boundary_threshold_right{-1.0F};
   float accel_cmd_coeff{0.0F};
   float steer_cmd_coeff{0.0F};
-
   float steer_rate_coeff{0.0F};
+  float steer_rate_l2_coeff{0.0F};
+  float steer_accel_coeff{0.0F};
+  float cmd_slew_coeff{0.0F};
+  /** Spatial window used only when deriving a cold-start nominal steer from the reference. */
+  float nominal_curvature_min_chord_length_m{1.5F};
   float lateral_acceleration_coeff{300.0F};
   float lateral_jerk_coeff{300.0F};
   float longitudinal_jerk_coeff{10.0F};
   float obstacle_collision_margin{0.5F};
-  float road_border_collision_margin{0.2F};
-  float drivable_area_crossing_coeff{10000.0F};
+  float road_border_collision_margin{0.3F};
+  float drivable_area_crossing_coeff{100.0F};
+  float goal_pos_coeff{1000.0F};
+  float goal_speed_coeff{0.0F};
+  float goal_yaw_coeff{500.0F};
+  float goal_terminal_scale{10.0F};
 };
 
 }  // namespace autoware::mppi_optimizer

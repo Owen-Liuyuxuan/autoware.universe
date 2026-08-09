@@ -91,6 +91,23 @@ inline bool writeMppiDebugCostsCsv(
   return true;
 }
 
+inline bool writeMppiDebugSteeringCostsCsv(
+  const std::string & path, const std::vector<MppiSteeringStepCostBreakdown> & steering_step_costs)
+{
+  std::ofstream out(path);
+  if (!out) {
+    return false;
+  }
+  out << "timestep,steer_rate_l2_cost,cmd_slew_cost,steer_accel_cost\n";
+  out << std::setprecision(9) << std::fixed;
+  for (size_t i = 0; i < steering_step_costs.size(); ++i) {
+    const auto & costs = steering_step_costs[i];
+    out << i << "," << costs.steer_rate_l2_cost << "," << costs.cmd_slew_cost << ","
+        << costs.steer_accel_cost << "\n";
+  }
+  return true;
+}
+
 inline bool writeMppiDebugRolloutsCsv(
   const std::string & path, const std::vector<FirstOrderDubinsMppiRollout> & rollouts)
 {
@@ -98,13 +115,13 @@ inline bool writeMppiDebugRolloutsCsv(
   if (!out) {
     return false;
   }
-  out << "rollout_index,cost,step,x,y\n";
+  out << "rollout_index,cost,step,x,y,is_worst\n";
   out << std::setprecision(9) << std::fixed;
   for (size_t r = 0; r < rollouts.size(); ++r) {
     const auto & rollout = rollouts[r];
     for (size_t s = 0; s < rollout.points.size(); ++s) {
       out << r << "," << rollout.cost << "," << s << "," << rollout.points[s].first << ","
-          << rollout.points[s].second << "\n";
+          << rollout.points[s].second << "," << (rollout.is_worst ? 1 : 0) << "\n";
     }
   }
   return true;
@@ -152,6 +169,55 @@ inline bool loadMppiDebugTrajectoryCsv(
   return !trajectory.points.empty();
 }
 
+inline bool writeMppiDebugNominalCsv(
+  const std::string & path, const std::vector<float> & accel_cmd,
+  const std::vector<float> & steer_cmd)
+{
+  const size_t n = std::min(accel_cmd.size(), steer_cmd.size());
+  std::ofstream out(path);
+  if (!out) {
+    return false;
+  }
+  out << "t_idx,accel_cmd,steer_cmd\n";
+  out << std::setprecision(9) << std::fixed;
+  for (size_t i = 0; i < n; ++i) {
+    out << i << "," << accel_cmd[i] << "," << steer_cmd[i] << "\n";
+  }
+  return true;
+}
+
+inline bool loadMppiDebugNominalCsv(
+  const std::string & path, std::vector<float> & accel_cmd, std::vector<float> & steer_cmd)
+{
+  std::ifstream in(path);
+  if (!in) {
+    return false;
+  }
+  accel_cmd.clear();
+  steer_cmd.clear();
+  std::string line;
+  if (!std::getline(in, line)) {
+    return false;
+  }
+  while (std::getline(in, line)) {
+    if (line.empty()) {
+      continue;
+    }
+    std::stringstream ss(line);
+    std::string cell;
+    std::vector<double> vals;
+    while (std::getline(ss, cell, ',')) {
+      vals.push_back(std::stod(cell));
+    }
+    if (vals.size() < 3U) {
+      continue;
+    }
+    accel_cmd.push_back(static_cast<float>(vals[1]));
+    steer_cmd.push_back(static_cast<float>(vals[2]));
+  }
+  return !accel_cmd.empty() && accel_cmd.size() == steer_cmd.size();
+}
+
 inline bool loadMppiDebugEgoCsv(const std::string & path, MppiDebugEgoState & ego)
 {
   std::ifstream in(path);
@@ -181,6 +247,7 @@ inline bool loadMppiDebugEgoCsv(const std::string & path, MppiDebugEgoState & eg
   ego.v = vals[4];
   ego.accel = vals[5];
   ego.steer = vals[6];
+  ego.last_applied_steer_cmd = vals.size() >= 8U ? vals[7] : ego.steer;
   return true;
 }
 

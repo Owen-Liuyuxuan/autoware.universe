@@ -7,6 +7,33 @@ namespace
 using S = FirstOrderDubinsBicycleParams::StateIndex;
 using C = FirstOrderDubinsBicycleParams::ControlIndex;
 
+constexpr float kMppiTimeStep = 0.1F;
+constexpr float kLowForwardSpeedThreshold = 2.0F;
+
+template <class PARAMS_T>
+__host__ __device__ float forwardAccelerationLowerBound(
+  const PARAMS_T & params, const float current_velocity)
+{
+  // The controller also uses an all-zero placeholder state for state-independent sequence
+  // clipping. At an exact stop, clampForwardState() already prevents reverse integration and
+  // acceleration wind-up, so retain the physical command bound here.
+  if (current_velocity > 0.0F && current_velocity < kLowForwardSpeedThreshold) {
+    const float kinematic_stop_accel = -current_velocity / kMppiTimeStep;
+    return fmaxf(params.min_accel, kinematic_stop_accel);
+  }
+  return params.min_accel;
+}
+
+__host__ __device__ void clampForwardState(float * next_state)
+{
+  const int velocity_idx = static_cast<int>(S::VEL_X);
+  const int acceleration_idx = static_cast<int>(S::ACCELERATION);
+  if (next_state[velocity_idx] <= 0.0F) {
+    next_state[velocity_idx] = 0.0F;
+    next_state[acceleration_idx] = fmaxf(0.0F, next_state[acceleration_idx]);
+  }
+}
+
 __host__ __device__ void firstOrderDubinsBicycleDeriv(
   const FirstOrderDubinsBicycleParams & p, const float * state, const float * control,
   float * state_der)
@@ -33,6 +60,8 @@ __host__ __device__ void firstOrderDubinsBicycleDeriv(
 
   const float steer_dot = clampSteerRate(p, (steer_cmd - steer) / steer_tau);
   state_der[static_cast<int>(S::STEER_ANGLE)] = steer_dot;
+  state_der[static_cast<int>(S::LAST_STEER_COMMAND)] = 0.0F;
+  state_der[static_cast<int>(S::LAST_STEER_RATE)] = 0.0F;
 }
 }  // namespace
 
@@ -80,6 +109,39 @@ void FirstOrderDubinsBicycleImpl<CLASS_T, PARAMS_T>::updateState(
   next_state(static_cast<int>(S::ACCELERATION)) = fmaxf(
     fminf(next_state(static_cast<int>(S::ACCELERATION)), this->params_.max_accel),
     this->params_.min_accel);
+  clampForwardState(next_state.data());
+}
+
+template <class CLASS_T, class PARAMS_T>
+void FirstOrderDubinsBicycleImpl<CLASS_T, PARAMS_T>::enforceConstraints(
+  Eigen::Ref<state_array> state, Eigen::Ref<control_array> control)
+{
+  PARENT_CLASS::enforceConstraints(state, control);
+  const int acceleration_idx = static_cast<int>(C::ACCELERATION_CMD);
+  const float lower_bound =
+    forwardAccelerationLowerBound(this->params_, state(static_cast<int>(S::VEL_X)));
+  control(acceleration_idx) =
+    fminf(fmaxf(control(acceleration_idx), lower_bound), this->params_.max_accel);
+}
+
+template <class CLASS_T, class PARAMS_T>
+void FirstOrderDubinsBicycleImpl<CLASS_T, PARAMS_T>::step(
+  Eigen::Ref<state_array> state, Eigen::Ref<state_array> next_state,
+  Eigen::Ref<state_array> state_der, const Eigen::Ref<const control_array> & control,
+  Eigen::Ref<output_array> output, const float t, const float dt)
+{
+  (void)t;
+  computeDynamics(state, control, state_der);
+  updateState(state, next_state, state_der, dt);
+  next_state(static_cast<int>(S::LAST_STEER_COMMAND)) = control(static_cast<int>(C::STEER_CMD));
+  next_state(static_cast<int>(S::LAST_STEER_RATE)) = state_der(static_cast<int>(S::STEER_ANGLE));
+  stateToOutput(next_state, output);
+  output(static_cast<int>(FirstOrderDubinsBicycleParams::OutputIndex::STEER_RATE)) =
+    state_der(static_cast<int>(S::STEER_ANGLE));
+  output(static_cast<int>(FirstOrderDubinsBicycleParams::OutputIndex::PREVIOUS_STEER_COMMAND)) =
+    state(static_cast<int>(S::LAST_STEER_COMMAND));
+  output(static_cast<int>(FirstOrderDubinsBicycleParams::OutputIndex::PREVIOUS_STEER_RATE)) =
+    state(static_cast<int>(S::LAST_STEER_RATE));
 }
 
 template <class CLASS_T, class PARAMS_T>
@@ -109,6 +171,51 @@ __device__ void FirstOrderDubinsBicycleImpl<CLASS_T, PARAMS_T>::updateState(
     if (i == static_cast<int>(S::ACCELERATION)) {
       next_state[i] = fmaxf(fminf(next_state[i], this->params_.max_accel), this->params_.min_accel);
     }
+  }
+  __syncthreads();
+  if (threadIdx.y == 0) {
+    clampForwardState(next_state);
+  }
+  __syncthreads();
+}
+
+template <class CLASS_T, class PARAMS_T>
+__device__ void FirstOrderDubinsBicycleImpl<CLASS_T, PARAMS_T>::enforceConstraints(
+  float * state, float * control)
+{
+  PARENT_CLASS::enforceConstraints(state, control);
+  if (threadIdx.y == 0) {
+    const int acceleration_idx = static_cast<int>(C::ACCELERATION_CMD);
+    const float lower_bound =
+      forwardAccelerationLowerBound(this->params_, state[static_cast<int>(S::VEL_X)]);
+    control[acceleration_idx] =
+      fminf(fmaxf(control[acceleration_idx], lower_bound), this->params_.max_accel);
+  }
+}
+
+template <class CLASS_T, class PARAMS_T>
+__device__ void FirstOrderDubinsBicycleImpl<CLASS_T, PARAMS_T>::step(
+  float * state, float * next_state, float * state_der, float * control, float * output,
+  float * theta_s, const float t, const float dt)
+{
+  (void)t;
+  computeDynamics(state, control, state_der, theta_s);
+  __syncthreads();
+  updateState(state, next_state, state_der, dt);
+  __syncthreads();
+  if (threadIdx.y == 0) {
+    next_state[static_cast<int>(S::LAST_STEER_COMMAND)] = control[static_cast<int>(C::STEER_CMD)];
+    next_state[static_cast<int>(S::LAST_STEER_RATE)] = state_der[static_cast<int>(S::STEER_ANGLE)];
+  }
+  __syncthreads();
+  stateToOutput(next_state, output);
+  __syncthreads();
+  if (threadIdx.y == 0) {
+    using O = FirstOrderDubinsBicycleParams::OutputIndex;
+    output[static_cast<int>(O::STEER_RATE)] = state_der[static_cast<int>(S::STEER_ANGLE)];
+    output[static_cast<int>(O::PREVIOUS_STEER_COMMAND)] =
+      state[static_cast<int>(S::LAST_STEER_COMMAND)];
+    output[static_cast<int>(O::PREVIOUS_STEER_RATE)] = state[static_cast<int>(S::LAST_STEER_RATE)];
   }
 }
 
@@ -143,6 +250,10 @@ __host__ __device__ void FirstOrderDubinsBicycleImpl<CLASS_T, PARAMS_T>::stateTo
   output[static_cast<int>(O::TOTAL_VELOCITY)] = fabsf(v);
   output[static_cast<int>(O::LONGITUDINAL_JERK)] = 0.0F;
   output[static_cast<int>(O::LATERAL_JERK)] = 0.0F;
+  output[static_cast<int>(O::STEER_RATE)] = 0.0F;
+  output[static_cast<int>(O::PREVIOUS_STEER_COMMAND)] =
+    state[static_cast<int>(S::LAST_STEER_COMMAND)];
+  output[static_cast<int>(O::PREVIOUS_STEER_RATE)] = state[static_cast<int>(S::LAST_STEER_RATE)];
 }
 
 template <class CLASS_T, class PARAMS_T>
