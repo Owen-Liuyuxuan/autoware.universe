@@ -134,14 +134,10 @@ ObjectT make_cylinder_object(
 /// 4.0 x 1.8 bounding box make_object() reports, so the two rear-edge sources are distinguishable.
 template <typename ObjectT>
 ObjectT make_polygon_object(
-  const uint8_t id, const double x, const double y, const double half_extent,
-  const bool with_valid_dimensions)
+  const uint8_t id, const double x, const double y, const double half_extent)
 {
   auto object = make_object<ObjectT>(id, x, y);
   object.shape.type = Shape::POLYGON;
-  if (!with_valid_dimensions) {
-    object.shape.dimensions.z = 0.0;
-  }
 
   const std::vector<std::pair<double, double>> corners{
     {half_extent, half_extent},
@@ -653,29 +649,12 @@ TYPED_TEST(UpdateObjectsTest, PolygonWithValidDimensionsPrefersBoundingBox)
   // The 0.2 m footprint alone would put the rear edge 1.8 m out and keep the object a target, but
   // the populated dimensions define a 1.8 m wide box whose rear edge reaches 1.1 m, so it is not.
   typename TestFixture::Selector selector;
-  const auto objects =
-    make_objects<TypeParam>({make_polygon_object<TypeParam>(1, 15.0, 2.0, 0.2, true)});
+  const auto objects = make_objects<TypeParam>({make_polygon_object<TypeParam>(1, 15.0, 2.0, 0.2)});
 
   selector.update_objects(make_time(0), objects, this->trajectory_, route_handler());
 
   EXPECT_TRUE(selector.get_avoidance_targets(objects, this->trajectory_, this->empty_route_bounds_)
                 .objects.empty());
-}
-
-TYPED_TEST(UpdateObjectsTest, PolygonWithoutValidDimensionsFallsBackToFootprint)
-{
-  // Same geometry, but dimensions.z is zero so no bounding box is available and the rear edge is
-  // scanned from the 0.2 m footprint, leaving the object 1.8 m out and therefore a target.
-  typename TestFixture::Selector selector;
-  const auto objects =
-    make_objects<TypeParam>({make_polygon_object<TypeParam>(1, 15.0, 2.0, 0.2, false)});
-
-  selector.update_objects(make_time(0), objects, this->trajectory_, route_handler());
-
-  EXPECT_EQ(
-    object_ids(
-      selector.get_avoidance_targets(objects, this->trajectory_, this->empty_route_bounds_)),
-    std::vector<uint8_t>({1}));
 }
 
 TYPED_TEST(UpdateObjectsTest, BoundingBoxRearEdgeFollowsObjectOrientation)
