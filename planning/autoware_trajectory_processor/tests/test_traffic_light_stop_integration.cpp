@@ -13,6 +13,7 @@
 // limitations under the License.
 
 #include "autoware/trajectory_processor/trajectory_modifier_plugins/traffic_light_stop.hpp"
+#include "autoware/trajectory_processor/trajectory_processor_plugin_base.hpp"
 #include "trajectory_processor_test_utils.hpp"
 
 #include <ament_index_cpp/get_package_share_directory.hpp>
@@ -518,8 +519,9 @@ TEST_F(TrafficLightStopIntegrationTest, TrajectoryModifiedWithAmberLightWhenPrev
     "Input trajectory should not be modified when it already contains a valid stop point");
 
   auto crossing_trajectory = create_straight_trajectory(0.0, 10.0, 10.0);
-  const bool modified = plugin_->modify_trajectory(crossing_trajectory, make_default_input(10.0));
-  EXPECT_TRUE(modified) << "Should modify trajectory when a prior stop attempt is detected and "
+  auto input = make_default_input(10.0);
+  const auto result = plugin_->process(crossing_trajectory, input);
+  EXPECT_TRUE(result == autoware::trajectory_processor::plugin::ProcessingResult::Modified) << "Should modify trajectory when a prior stop attempt is detected and "
                            "reject_if_stop_detected is true";
   EXPECT_FLOAT_EQ(crossing_trajectory.back().longitudinal_velocity_mps, 0.0F);
 }
