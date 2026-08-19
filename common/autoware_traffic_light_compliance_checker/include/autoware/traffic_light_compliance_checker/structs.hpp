@@ -85,6 +85,13 @@ struct ComplianceResult
   Violations violations;
 };
 
+/// @brief how the current amber phase was reached
+enum class AmberState {
+  kNotAmber,      ///< not currently in an amber state
+  kFromGreen,     ///< amber reached from green circle
+  kFromNonGreen,  ///< amber reached from non-green
+};
+
 /// @brief parameters for traffic light signal status tracking
 struct StatusTrackerParameters
 {
@@ -102,6 +109,7 @@ struct Parameters
   double crossing_time_limit;
   bool treat_amber_light_as_red_light;
   bool treat_unknown_light_as_red_light;
+  bool enable_arrow_aware_amber_passing;
   double stop_overshoot_margin;
   double allow_if_cannot_stop_distance;
   double min_lookahead_distance;
