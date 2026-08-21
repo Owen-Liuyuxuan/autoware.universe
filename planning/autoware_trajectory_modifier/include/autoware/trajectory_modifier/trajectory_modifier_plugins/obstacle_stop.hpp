@@ -17,7 +17,6 @@
 
 #include "autoware/trajectory_modifier/trajectory_modifier_plugins/trajectory_modifier_plugin_base.hpp"
 #include "autoware/trajectory_modifier/trajectory_modifier_utils/obstacle_stop_utils.hpp"
-#include "autoware/trajectory_modifier/trajectory_modifier_utils/utils.hpp"
 
 #include <rclcpp/rclcpp.hpp>
 
@@ -35,7 +34,6 @@ using autoware_internal_debug_msgs::msg::StringStamped;
 using autoware_internal_planning_msgs::msg::SafetyFactor;
 using autoware_internal_planning_msgs::msg::SafetyFactorArray;
 using autoware_perception_msgs::msg::PredictedObjects;
-using autoware_utils_geometry::MultiPolygon2d;
 using autoware_utils_geometry::Polygon2d;
 using sensor_msgs::msg::PointCloud2;
 using utils::obstacle_stop::CollisionPoint;
@@ -57,7 +55,7 @@ public:
 
   const TrajectoryModifierParams::ObstacleStop & get_params() const { return params_; }
 
-  void publish_debug_data([[maybe_unused]] const std::string & ns) const override;
+  void publish_debug_data(const std::string & ns) const override;
 
 protected:
   void on_initialize(const TrajectoryModifierParams & params) override;
@@ -81,7 +79,6 @@ private:
   std::unordered_map<utils::obstacle_stop::ObjectType, double> object_decel_map_;
   utils::obstacle_stop::LateralMarginMap lateral_margin_map_;
 
-  MarkerArray marker_array_;
   rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr debug_viz_pub_;
   rclcpp::Publisher<PointCloud2>::SharedPtr pub_filtered_pointcloud_;
   rclcpp::Publisher<StringStamped>::SharedPtr pub_debug_text_;
