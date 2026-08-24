@@ -92,9 +92,6 @@ DiffusionPlanner::DiffusionPlanner(const rclcpp::NodeOptions & options)
   pub_mppi_optimized_trajectory_ =
     this->create_publisher<Trajectory>("~/debug/mppi/optimized_trajectory", 1);
   pub_mppi_markers_ = this->create_publisher<MarkerArray>("~/debug/mppi/markers", 1);
-  // Latched so late-joining debug tools see the current enable state immediately.
-  pub_mppi_enabled_ = this->create_publisher<std_msgs::msg::Bool>(
-    "~/debug/mppi/enabled", rclcpp::QoS{1}.transient_local());
   pub_trajectories_ = this->create_publisher<CandidateTrajectories>("~/output/trajectories", 1);
   pub_objects_ =
     this->create_publisher<PredictedObjects>("~/output/predicted_objects", rclcpp::QoS(1));
@@ -119,7 +116,6 @@ DiffusionPlanner::DiffusionPlanner(const rclcpp::NodeOptions & options)
     "~/debug/guidance_status", 1);
 
   set_up_params();
-  publish_mppi_enabled(params_.use_mppi_optimizer && !params_.shadow_mode);
   vehicle_info_ = autoware::vehicle_info_utils::VehicleInfoUtils(*this).getVehicleInfo();
 
   // Create core instance
@@ -398,7 +394,6 @@ SetParametersResult DiffusionPlanner::on_parameter(
       temp_params.line_string_max_step_m != previous_line_string_max_step_m;
     params_ = temp_params;
     core_->update_params(params_);
-    publish_mppi_enabled(params_.use_mppi_optimizer && !params_.shadow_mode);
 
     if (
       args_path_changed || model_paths_changed || batch_size_changed || dpm_solver_steps_changed ||
@@ -688,11 +683,9 @@ void DiffusionPlanner::on_timer()
           driving_along_targets, frame_context->ego_kinematic_state.pose.pose.position.z));
       record_section_time(
         *stop_watch_ptr_, "mppi_optimizer/optimize_trajectory", *diagnostics_inference_);
-      const bool apply_mppi = !params_.shadow_mode;
-      if (apply_mppi) {
+      if (!params_.shadow_mode) {
         planner_output.trajectory = mppi_result.trajectory;
       }
-      publish_mppi_enabled(apply_mppi);
 
       autoware_utils_debug::ScopedTimeTrack publish_debug_st(
         "mppi_optimizer/publish_debug", *time_keeper_);
@@ -705,15 +698,12 @@ void DiffusionPlanner::on_timer()
       record_section_time(
         *stop_watch_ptr_, "mppi_optimizer/publish_debug", *diagnostics_inference_);
     } catch (const std::runtime_error & e) {
-      publish_mppi_enabled(false);
       RCLCPP_ERROR_STREAM(get_logger(), "MPPI optimization failed: " << e.what());
       diagnostics_inference_->update_level_and_message(DiagnosticStatus::ERROR, e.what());
       diagnostics_inference_->publish(frame_time);
       return;
     }
     record_section_time(*stop_watch_ptr_, "mppi_optimizer", *diagnostics_inference_);
-  } else {
-    publish_mppi_enabled(false);
   }
 
   publish_guidance_status(planner_output.guidance_triggered, frame_time);
@@ -773,13 +763,6 @@ void DiffusionPlanner::publish_guidance_status(
   msg.data = result;
 
   pub_guidance_status_->publish(msg);
-}
-
-void DiffusionPlanner::publish_mppi_enabled(bool enabled)
-{
-  std_msgs::msg::Bool msg;
-  msg.data = enabled;
-  pub_mppi_enabled_->publish(msg);
 }
 
 void DiffusionPlanner::publish_mppi_debug(
