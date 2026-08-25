@@ -259,6 +259,14 @@ class MppiWithHistoryAccess : public Mppi
 public:
   using Mppi::Mppi;
 
+  /** Replace the vendor-smoothed sequence and keep its host state rollout consistent. */
+  void setControlSequenceAndRecomputeState(
+    const Mppi::control_trajectory & controls, const Mppi::state_array & initial_state)
+  {
+    this->control_ = controls;
+    this->computeStateTrajectory(initial_state);
+  }
+
   void setControlHistory(
     const float accel_tm2, const float steer_tm2, const float accel_tm1, const float steer_tm1)
   {
@@ -674,7 +682,7 @@ struct FirstOrderDubinsMppiInterface::Impl
   FirstOrderDubinsMppiVehicleParams vehicle_params{};
   FirstOrderDubinsMppiCostParams user_cost_params_{};
   FirstOrderDubinsMppiKinematicLimits active_kinematic_limits{};
-  bool kinematic_limit_stop_profile_active{false};
+  detail::ActiveVelocityLimitProfile active_velocity_limit_profile;
   MppiDebugTrajectoryLogger debug_trajectory_logger;
   COST cost;
   FirstOrderDubinsBicycleCostParams<kRefHorizon> cost_params{};
@@ -1146,17 +1154,24 @@ struct FirstOrderDubinsMppiInterface::Impl
     const int accel_idx =
       static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::ACCELERATION_CMD);
     const int steer_idx = static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::STEER_CMD);
-    float stop_profile_velocity = std::max(ego.velocity, 0.0F);
     for (int t = 0; t < kMppiHorizon; ++t) {
-      float acceleration_command = (*nominal)[static_cast<size_t>(t)].accel_cmd;
-      if (kinematic_limit_stop_profile_active) {
-        acceleration_command = stop_profile_velocity > 0.0F
-                                 ? *active_kinematic_limits.min_longitudinal_acceleration
-                                 : 0.0F;
-        stop_profile_velocity = std::max(0.0F, stop_profile_velocity + acceleration_command * kDt);
-      }
-      u_nom(accel_idx, t) = acceleration_command;
+      u_nom(accel_idx, t) = (*nominal)[static_cast<size_t>(t)].accel_cmd;
       u_nom(steer_idx, t) = (*nominal)[static_cast<size_t>(t)].steer_cmd;
+    }
+  }
+
+  void applyActiveVelocityLimitToNominal()
+  {
+    if (!active_velocity_limit_profile.active) {
+      return;
+    }
+    const int accel_idx =
+      static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::ACCELERATION_CMD);
+    const int count =
+      std::min(kMppiHorizon, static_cast<int>(active_velocity_limit_profile.controls.size()));
+    for (int timestep = 0; timestep < count; ++timestep) {
+      u_nom(accel_idx, timestep) =
+        active_velocity_limit_profile.controls[static_cast<std::size_t>(timestep)].accel_cmd;
     }
   }
 
@@ -1316,9 +1331,23 @@ struct FirstOrderDubinsMppiInterface::Impl
 
     const auto initial_state =
       detail::makeInitialState(odometry, acceleration, steering_status, vehicle_params);
-    kinematic_limit_stop_profile_active = detail::applyKinematicLimitStopProfile(
-      diffusion_reference, initial_state.velocity, active_kinematic_limits, kDt);
+    constexpr float kSameVelocityLimitToleranceMps = 1.0E-3F;
+    const bool keep_velocity_limit_active =
+      active_velocity_limit_profile.active && active_kinematic_limits.max_velocity &&
+      std::abs(
+        *active_kinematic_limits.max_velocity - active_velocity_limit_profile.target_velocity) <=
+        kSameVelocityLimitToleranceMps;
+    const std::vector<FirstOrderDubinsMppiControl> profile_seed(
+      std::max(static_cast<std::size_t>(kMppiHorizon), diffusion_reference.points.size()));
+    active_velocity_limit_profile = detail::buildActiveVelocityLimitProfile(
+      profile_seed, initial_state, active_kinematic_limits, vehicle_params, acc_delay_steps,
+      accel_delay_buffer, kDt, keep_velocity_limit_active);
+    detail::applyActiveVelocityLimitProfile(diffusion_reference, active_velocity_limit_profile);
     seedNominalControl(diffusion_reference, tracking_start_idx, initial_state);
+    applyActiveVelocityLimitToNominal();
+    if (active_velocity_limit_profile.active) {
+      snapshotNominalForLog();
+    }
 
     x = model.getZeroState();
     x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::POS_X)) = initial_state.x;
@@ -1362,7 +1391,7 @@ struct FirstOrderDubinsMppiInterface::Impl
     auto prepared_reference = detail::buildReferenceHorizon(
       diffusion_reference, ego, kRefHorizon, kDt, tracking_start_idx,
       &diffusion_reference_chord_length_s);
-    if (active_kinematic_limits.max_velocity && !kinematic_limit_stop_profile_active) {
+    if (active_kinematic_limits.max_velocity && !active_velocity_limit_profile.active) {
       for (auto & sample : prepared_reference) {
         sample.velocity = std::clamp(sample.velocity, 0.0F, *active_kinematic_limits.max_velocity);
       }
@@ -1438,7 +1467,21 @@ struct FirstOrderDubinsMppiInterface::Impl
     cudaStreamSynchronize(controller->stream_);
     checkCuda("computeControl");
 
-    const Mppi::control_trajectory u_opt_traj = controller->getControlSeq();
+    Mppi::control_trajectory u_opt_traj = controller->getControlSeq();
+    if (active_velocity_limit_profile.active) {
+      const int accel_idx =
+        static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::ACCELERATION_CMD);
+      const int count = std::min(
+        static_cast<int>(u_opt_traj.cols()),
+        static_cast<int>(active_velocity_limit_profile.controls.size()));
+      for (int timestep = 0; timestep < count; ++timestep) {
+        u_opt_traj(accel_idx, timestep) =
+          active_velocity_limit_profile.controls[static_cast<std::size_t>(timestep)].accel_cmd;
+      }
+      // The vendor Savitzky-Golay filter remains unchanged and executes first. Project its
+      // longitudinal result onto the active profile and reconstruct the host state rollout.
+      controller->setControlSequenceAndRecomputeState(u_opt_traj, x);
+    }
     u_opt = u_opt_traj;
 
     DYN::control_array u_apply = u_opt_traj.col(0);
@@ -1845,6 +1888,21 @@ FirstOrderDubinsMppiOptimizationResult FirstOrderDubinsMppiInterface::optimizeTr
   }
 
   Trajectory output = detail::buildOptimizedTrajectory(input, optimized_states, optimized_controls);
+  if (impl_->active_velocity_limit_profile.active) {
+    // buildOptimizedTrajectory intentionally preserves the suffix outside the MPPI horizon.
+    // A global external velocity limit must not allow that suffix to jump back to its input speed.
+    const auto & profile = impl_->active_velocity_limit_profile;
+    for (std::size_t index = num_points; index < output.points.size(); ++index) {
+      auto & point = output.points[index];
+      if (index < profile.velocities.size()) {
+        point.longitudinal_velocity_mps = profile.velocities[index];
+        point.acceleration_mps2 = profile.accelerations[index];
+      } else {
+        point.longitudinal_velocity_mps = profile.target_velocity;
+        point.acceleration_mps2 = 0.0F;
+      }
+    }
+  }
 
   // Validate only states that come from getActualStateSeq. The host-extrapolated x_final
   // (vendor GPU/host horizon mismatch) is appended so the published path matches the DP
@@ -1891,6 +1949,7 @@ FirstOrderDubinsMppiOptimizationResult FirstOrderDubinsMppiInterface::optimizeTr
   result.debug.nominal_control_profile.acceleration_commands_mps2 = impl_->logged_nominal_accel;
   result.debug.nominal_control_profile.steering_commands_rad = impl_->logged_nominal_steer;
   result.debug.validation = validation;
+  result.debug.external_velocity_limit_active = impl_->active_velocity_limit_profile.active;
   if (impl_->enable_rollout_visualization) {
     buildRolloutVisualization(
       *impl_->controller, impl_->sampler, impl_->model, x_at_optimization,
@@ -1956,8 +2015,10 @@ FirstOrderDubinsMppiOptimizationResult FirstOrderDubinsMppiInterface::optimizeTr
 
   if (impl_->skip_if_invalid && !validation.isValid()) {
     result.trajectory = input;
+    detail::applyActiveVelocityLimitProfile(
+      result.trajectory, impl_->active_velocity_limit_profile);
     result.debug.reference_trajectory = input;
-    result.debug.optimized_trajectory = input;
+    result.debug.optimized_trajectory = result.trajectory;
     // Keep nominal_trajectory: still shows the warm-start open-loop path.
     result.debug.was_rejected = true;
     RCLCPP_WARN(

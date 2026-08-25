@@ -262,7 +262,10 @@ ProcessingResult TrajectoryMppiOptimizer::process(
       data.current_odometry->pose.pose.position.z);
     debug_pending_ = true;
 
-    const bool apply_result = !params_.shadow_mode && !result.debug.was_rejected;
+    const bool apply_limited_fallback =
+      result.debug.was_rejected && result.debug.external_velocity_limit_active;
+    const bool apply_result =
+      !params_.shadow_mode && (!result.debug.was_rejected || apply_limited_fallback);
     publish_enabled(apply_result);
     publish_cost_diagnostics(result.debug, apply_result, rclcpp::Time{input.header.stamp});
     if (result.debug.was_rejected) {

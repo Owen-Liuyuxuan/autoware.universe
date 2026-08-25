@@ -204,6 +204,8 @@ struct FirstOrderDubinsMppiDebug
   float baseline_cost{0.0F};
   /** Hard-constraint validation of the generated post-step states. */
   FirstOrderDubinsMppiValidationResult validation;
+  /** True while the deterministic external maximum-velocity profile is applied. */
+  bool external_velocity_limit_active{false};
   /** True when skip_if_invalid replaced the optimized trajectory with the input trajectory. */
   bool was_rejected{false};
 };

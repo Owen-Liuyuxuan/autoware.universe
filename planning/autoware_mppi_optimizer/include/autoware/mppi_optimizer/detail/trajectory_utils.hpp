@@ -61,6 +61,20 @@ struct OptimizedState
   float steering{0.0F};
 };
 
+/**
+ * Deterministic longitudinal profile used only while an external maximum velocity is restrictive.
+ * Steering commands are copied from the supplied MPPI control sequence unchanged.
+ */
+struct ActiveVelocityLimitProfile
+{
+  bool active{false};
+  float target_velocity{0.0F};
+  std::vector<FirstOrderDubinsMppiControl> controls;
+  /** Post-step velocity and acceleration states aligned with controls. */
+  std::vector<float> velocities;
+  std::vector<float> accelerations;
+};
+
 [[nodiscard]] bool isOptimizationRequired(const Trajectory & trajectory, double min_length);
 
 void setInitialEngageVelocity(
@@ -78,12 +92,22 @@ void setInitialEngageVelocity(
   const std::vector<float> * cumulative_chord_length_s = nullptr);
 
 /**
- * Replace trajectory velocity/acceleration with a constant-deceleration stop profile when an
- * active maximum velocity is below the current velocity. Returns true when the profile is applied.
+ * Build the fastest delay-, lag-, acceleration-, and jerk-aware profile toward an external
+ * maximum velocity. The result is inactive, and the supplied controls are returned unchanged,
+ * unless the maximum velocity is finite and is newly restrictive, is zero, or is being retained
+ * from the preceding active cycle.
  */
-[[nodiscard]] bool applyKinematicLimitStopProfile(
-  Trajectory & trajectory, float current_velocity,
-  const FirstOrderDubinsMppiKinematicLimits & limits, float dt = kMppiDt);
+[[nodiscard]] ActiveVelocityLimitProfile buildActiveVelocityLimitProfile(
+  const std::vector<FirstOrderDubinsMppiControl> & controls, const InitialState & initial_state,
+  const FirstOrderDubinsMppiKinematicLimits & limits,
+  const FirstOrderDubinsMppiVehicleParams & vehicle_params, int acceleration_delay_steps = 0,
+  const std::vector<float> & acceleration_delay_buffer = {}, float dt = kMppiDt,
+  bool keep_active = false);
+
+/** Apply an active profile to trajectory velocity/acceleration fields; inactive is an exact no-op.
+ */
+void applyActiveVelocityLimitProfile(
+  Trajectory & trajectory, const ActiveVelocityLimitProfile & profile);
 
 [[nodiscard]] std::vector<FirstOrderDubinsMppiControl> buildDiffusionNominalControl(
   const Trajectory & reference, std::size_t start_idx,

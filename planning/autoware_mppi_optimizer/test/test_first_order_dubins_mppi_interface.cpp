@@ -287,6 +287,115 @@ TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, ActiveLimitCostRemainsFiniteUnderEx
   EXPECT_NEAR(weight_sum, 1.0F, 1.0E-3F);
 }
 
+TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, InactiveVelocityLimitProducesIdenticalOutput)
+{
+  FirstOrderDubinsMppiVehicleParams vehicle_params;
+  vehicle_params.acc_time_delay = 0.0F;
+  vehicle_params.steer_time_delay = 0.0F;
+  const auto input = makeStraightTrajectory(85U);
+  FirstOrderDubinsMppiOptimizationResult unrestricted_result;
+  FirstOrderDubinsMppiOptimizationResult nonrestrictive_result;
+  std::vector<float> unrestricted_acceleration;
+  std::vector<float> unrestricted_steering;
+  std::vector<float> nonrestrictive_acceleration;
+  std::vector<float> nonrestrictive_steering;
+
+  {
+    FirstOrderDubinsMppiInterface unrestricted;
+    unrestricted.setVehicleParams(vehicle_params);
+    unrestricted_result = optimize(unrestricted, input);
+    ASSERT_TRUE(
+      unrestricted.copyLastOptimizedControl(unrestricted_acceleration, unrestricted_steering));
+  }
+  {
+    FirstOrderDubinsMppiInterface nonrestrictive;
+    nonrestrictive.setVehicleParams(vehicle_params);
+    FirstOrderDubinsMppiKinematicLimits limits;
+    limits.max_velocity = 30.0F;
+    nonrestrictive_result =
+      optimize(nonrestrictive, input, makeOdometry(), TrackedObjects{}, {}, limits);
+    ASSERT_TRUE(nonrestrictive.copyLastOptimizedControl(
+      nonrestrictive_acceleration, nonrestrictive_steering));
+  }
+
+  EXPECT_TRUE(nonrestrictive_result.trajectory == unrestricted_result.trajectory);
+  EXPECT_FALSE(unrestricted_result.debug.external_velocity_limit_active);
+  EXPECT_FALSE(nonrestrictive_result.debug.external_velocity_limit_active);
+  EXPECT_TRUE(
+    nonrestrictive_result.debug.nominal_trajectory == unrestricted_result.debug.nominal_trajectory);
+  EXPECT_EQ(nonrestrictive_acceleration, unrestricted_acceleration);
+  EXPECT_EQ(nonrestrictive_steering, unrestricted_steering);
+}
+
+TEST_F(
+  FirstOrderDubinsMppiInterfaceGpuTest, ActiveZeroLimitProjectsPostSmootherLongitudinalSequence)
+{
+  FirstOrderDubinsMppiVehicleParams vehicle_params;
+  vehicle_params.acc_time_constant = 0.1F;
+  vehicle_params.acc_time_delay = 0.1F;
+  vehicle_params.steer_time_delay = 0.0F;
+  vehicle_params.vel_rate_lim = 3.0F;
+  interface_->setVehicleParams(vehicle_params);
+
+  FirstOrderDubinsMppiKinematicLimits limits;
+  limits.max_velocity = 0.0F;
+  limits.min_longitudinal_acceleration = -2.0F;
+  limits.max_longitudinal_acceleration = 1.0F;
+  limits.min_longitudinal_jerk = -10.0F;
+  limits.max_longitudinal_jerk = 10.0F;
+  auto odometry = makeOdometry();
+  odometry.twist.twist.linear.x = 4.0;
+
+  const auto result =
+    optimize(*interface_, makeStraightTrajectory(85U), odometry, TrackedObjects{}, {}, limits);
+
+  EXPECT_TRUE(result.debug.external_velocity_limit_active);
+  std::vector<float> acceleration;
+  std::vector<float> steering;
+  ASSERT_TRUE(interface_->copyLastOptimizedControl(acceleration, steering));
+  ASSERT_GE(acceleration.size(), 8U);
+  EXPECT_FLOAT_EQ(acceleration[0], -1.0F);
+  EXPECT_FLOAT_EQ(acceleration[1], -2.0F);
+  for (std::size_t index = 2U; index < 8U; ++index) {
+    EXPECT_FLOAT_EQ(acceleration[index], -2.0F);
+  }
+  ASSERT_EQ(result.trajectory.points.size(), 85U);
+  EXPECT_FLOAT_EQ(result.trajectory.points[0].longitudinal_velocity_mps, 4.0F);
+  EXPECT_FLOAT_EQ(result.trajectory.points[1].longitudinal_velocity_mps, 4.0F);
+  EXPECT_FLOAT_EQ(result.trajectory.points[2].longitudinal_velocity_mps, 3.9F);
+  EXPECT_FLOAT_EQ(result.trajectory.points.back().longitudinal_velocity_mps, 0.0F);
+}
+
+TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, RejectedActiveLimitRetainsLongitudinalFallback)
+{
+  FirstOrderDubinsMppiCostParams cost_params;
+  cost_params.boundary_threshold = 0.5F;
+  interface_->setCostParams(cost_params);
+  FirstOrderDubinsMppiRuntimeOptions options;
+  options.skip_if_invalid = true;
+  interface_->setRuntimeOptions(options);
+
+  FirstOrderDubinsMppiKinematicLimits limits;
+  limits.max_velocity = 0.0F;
+  limits.min_longitudinal_acceleration = -2.0F;
+  limits.max_longitudinal_acceleration = 1.0F;
+  limits.min_longitudinal_jerk = -10.0F;
+  limits.max_longitudinal_jerk = 10.0F;
+  const auto input = makeLaterallyOffsetTrajectory(0.0F, 0.5F);
+  auto odometry = makeOdometry();
+  odometry.pose.pose.position.y = 0.5;
+
+  const auto result = optimize(*interface_, input, odometry, TrackedObjects{}, {}, limits);
+
+  EXPECT_TRUE(result.debug.was_rejected);
+  EXPECT_TRUE(result.debug.external_velocity_limit_active);
+  EXPECT_EQ(result.trajectory.points.size(), input.points.size());
+  EXPECT_LT(
+    result.trajectory.points.back().longitudinal_velocity_mps,
+    input.points.back().longitudinal_velocity_mps);
+  EXPECT_TRUE(result.debug.optimized_trajectory == result.trajectory);
+}
+
 TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, AppliesPerChannelActuatorDelayWithoutRefShift)
 {
   FirstOrderDubinsMppiVehicleParams vehicle_params;

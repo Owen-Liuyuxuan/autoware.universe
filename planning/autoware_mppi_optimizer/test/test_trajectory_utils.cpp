@@ -153,38 +153,130 @@ TEST(ReferenceHorizon, EmptyInputHoldsTheMeasuredEgoState)
   }
 }
 
-TEST(KinematicLimitStopProfile, UsesConstantMinimumAccelerationUntilZeroVelocity)
+TEST(ActiveVelocityLimitProfile, InactivePathPreservesControlsAndTrajectoryExactly)
 {
-  auto trajectory = makeTrajectory(30U, 1.0, 9.0F);
+  const std::vector<FirstOrderDubinsMppiControl> controls = {{-1.0F, 0.2F}, {0.5F, -0.3F}};
+  InitialState ego;
+  ego.velocity = 5.0F;
+  FirstOrderDubinsMppiVehicleParams vehicle;
+
+  const auto without_limit =
+    buildActiveVelocityLimitProfile(controls, ego, FirstOrderDubinsMppiKinematicLimits{}, vehicle);
+  EXPECT_FALSE(without_limit.active);
+  ASSERT_EQ(without_limit.controls.size(), controls.size());
+  for (std::size_t index = 0; index < controls.size(); ++index) {
+    EXPECT_FLOAT_EQ(without_limit.controls[index].accel_cmd, controls[index].accel_cmd);
+    EXPECT_FLOAT_EQ(without_limit.controls[index].steer_cmd, controls[index].steer_cmd);
+  }
+
   FirstOrderDubinsMppiKinematicLimits limits;
-  limits.max_velocity = 4.0F;
+  limits.max_velocity = ego.velocity;
+  const auto nonrestrictive = buildActiveVelocityLimitProfile(controls, ego, limits, vehicle);
+  EXPECT_FALSE(nonrestrictive.active);
+  ASSERT_EQ(nonrestrictive.controls.size(), controls.size());
+  for (std::size_t index = 0; index < controls.size(); ++index) {
+    EXPECT_FLOAT_EQ(nonrestrictive.controls[index].accel_cmd, controls[index].accel_cmd);
+    EXPECT_FLOAT_EQ(nonrestrictive.controls[index].steer_cmd, controls[index].steer_cmd);
+  }
+
+  auto trajectory = makeTrajectory(3U, 1.0, 3.0F);
+  const auto original = trajectory;
+  applyActiveVelocityLimitProfile(trajectory, nonrestrictive);
+  EXPECT_TRUE(trajectory == original);
+}
+
+TEST(ActiveVelocityLimitProfile, BuildsDelayAndJerkAwareFastStop)
+{
+  std::vector<FirstOrderDubinsMppiControl> controls(40U, {0.7F, 0.1F});
+  InitialState ego;
+  ego.velocity = 4.0F;
+  ego.acceleration = 0.0F;
+  FirstOrderDubinsMppiVehicleParams vehicle;
+  vehicle.acc_time_constant = 0.1F;
+  vehicle.vel_rate_lim = 3.0F;
+  FirstOrderDubinsMppiKinematicLimits limits;
+  limits.max_velocity = 0.0F;
   limits.min_longitudinal_acceleration = -2.0F;
   limits.max_longitudinal_acceleration = 1.0F;
+  limits.min_longitudinal_jerk = -10.0F;
+  limits.max_longitudinal_jerk = 10.0F;
 
-  ASSERT_TRUE(applyKinematicLimitStopProfile(trajectory, 5.0F, limits, 0.1F));
-  ASSERT_EQ(trajectory.points.size(), 30U);
-  EXPECT_NEAR(trajectory.points[0].longitudinal_velocity_mps, 4.8F, 1.0E-6F);
-  EXPECT_FLOAT_EQ(trajectory.points[0].acceleration_mps2, -2.0F);
-  EXPECT_NEAR(trajectory.points[23].longitudinal_velocity_mps, 0.2F, 1.0E-5F);
-  EXPECT_FLOAT_EQ(trajectory.points[23].acceleration_mps2, -2.0F);
-  EXPECT_FLOAT_EQ(trajectory.points[24].longitudinal_velocity_mps, 0.0F);
-  EXPECT_FLOAT_EQ(trajectory.points[24].acceleration_mps2, -2.0F);
-  EXPECT_FLOAT_EQ(trajectory.points[25].longitudinal_velocity_mps, 0.0F);
-  EXPECT_FLOAT_EQ(trajectory.points[25].acceleration_mps2, 0.0F);
-  EXPECT_FLOAT_EQ(trajectory.points.back().longitudinal_velocity_mps, 0.0F);
+  const auto profile =
+    buildActiveVelocityLimitProfile(controls, ego, limits, vehicle, 1, {0.0F}, 0.1F);
+
+  ASSERT_TRUE(profile.active);
+  ASSERT_EQ(profile.controls.size(), controls.size());
+  ASSERT_EQ(profile.velocities.size(), controls.size());
+  ASSERT_EQ(profile.accelerations.size(), controls.size());
+  EXPECT_FLOAT_EQ(profile.controls[0].accel_cmd, -1.0F);
+  EXPECT_FLOAT_EQ(profile.controls[1].accel_cmd, -2.0F);
+  EXPECT_FLOAT_EQ(profile.controls[2].accel_cmd, -2.0F);
+  EXPECT_FLOAT_EQ(profile.velocities[0], 4.0F);
+  EXPECT_FLOAT_EQ(profile.velocities[1], 4.0F);
+  EXPECT_FLOAT_EQ(profile.velocities[2], 3.9F);
+  EXPECT_FLOAT_EQ(profile.accelerations[0], 0.0F);
+  EXPECT_FLOAT_EQ(profile.accelerations[1], -1.0F);
+  EXPECT_FLOAT_EQ(profile.accelerations[2], -2.0F);
+  EXPECT_LE(profile.velocities.back(), 0.05F);
+  for (std::size_t index = 0; index < controls.size(); ++index) {
+    EXPECT_FLOAT_EQ(profile.controls[index].steer_cmd, controls[index].steer_cmd);
+    EXPECT_GE(profile.controls[index].accel_cmd, -2.0F);
+    EXPECT_LE(profile.controls[index].accel_cmd, 0.0F);
+    EXPECT_GE(profile.velocities[index], 0.0F);
+  }
+}
+
+TEST(ActiveVelocityLimitProfile, SettlesAtNonzeroLimitInsteadOfStopping)
+{
+  const std::vector<FirstOrderDubinsMppiControl> controls(40U);
+  InitialState ego;
+  ego.velocity = 4.0F;
+  FirstOrderDubinsMppiVehicleParams vehicle;
+  vehicle.acc_time_constant = 0.1F;
+  FirstOrderDubinsMppiKinematicLimits limits;
+  limits.max_velocity = 2.0F;
+  limits.min_longitudinal_acceleration = -2.0F;
+  limits.max_longitudinal_acceleration = 1.0F;
+  limits.min_longitudinal_jerk = -10.0F;
+  limits.max_longitudinal_jerk = 10.0F;
+
+  const auto profile = buildActiveVelocityLimitProfile(controls, ego, limits, vehicle);
+
+  ASSERT_TRUE(profile.active);
+  EXPECT_NEAR(profile.velocities.back(), 2.0F, 0.05F);
+  EXPECT_NEAR(profile.accelerations.back(), 0.0F, 1.0E-5F);
+
+  auto trajectory = makeTrajectory(45U, 1.0, 9.0F);
+  applyActiveVelocityLimitProfile(trajectory, profile);
+  EXPECT_NEAR(trajectory.points[39].longitudinal_velocity_mps, 2.0F, 0.05F);
+  EXPECT_FLOAT_EQ(trajectory.points.back().longitudinal_velocity_mps, 2.0F);
   EXPECT_FLOAT_EQ(trajectory.points.back().acceleration_mps2, 0.0F);
 }
 
-TEST(KinematicLimitStopProfile, LeavesProfileUnchangedWhenCurrentVelocityIsWithinLimit)
+TEST(ActiveVelocityLimitProfile, RetainsOnlyAnExplicitlyActiveUnchangedLimit)
 {
-  auto trajectory = makeTrajectory(3U, 1.0, 3.0F);
-  const auto original = trajectory;
+  const std::vector<FirstOrderDubinsMppiControl> controls(4U, {0.3F, -0.1F});
+  InitialState ego;
+  ego.velocity = 2.0F;
+  FirstOrderDubinsMppiVehicleParams vehicle;
   FirstOrderDubinsMppiKinematicLimits limits;
-  limits.max_velocity = 5.0F;
-  limits.min_longitudinal_acceleration = -2.0F;
+  limits.max_velocity = 2.0F;
 
-  EXPECT_FALSE(applyKinematicLimitStopProfile(trajectory, 5.0F, limits, 0.1F));
-  EXPECT_TRUE(trajectory == original);
+  const auto newly_nonrestrictive = buildActiveVelocityLimitProfile(controls, ego, limits, vehicle);
+  EXPECT_FALSE(newly_nonrestrictive.active);
+
+  const auto retained =
+    buildActiveVelocityLimitProfile(controls, ego, limits, vehicle, 0, {}, 0.1F, true);
+  EXPECT_TRUE(retained.active);
+
+  const auto cleared = buildActiveVelocityLimitProfile(
+    controls, ego, FirstOrderDubinsMppiKinematicLimits{}, vehicle, 0, {}, 0.1F, true);
+  EXPECT_FALSE(cleared.active);
+  ASSERT_EQ(cleared.controls.size(), controls.size());
+  for (std::size_t index = 0; index < controls.size(); ++index) {
+    EXPECT_FLOAT_EQ(cleared.controls[index].accel_cmd, controls[index].accel_cmd);
+    EXPECT_FLOAT_EQ(cleared.controls[index].steer_cmd, controls[index].steer_cmd);
+  }
 }
 
 TEST(CumulativeChordLength, AccumulatesPolylineSegmentLengthsByIndex)
