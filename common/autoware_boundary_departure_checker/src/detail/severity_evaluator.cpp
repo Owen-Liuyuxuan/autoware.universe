@@ -148,6 +148,16 @@ bool is_near_boundary(const Side<std::optional<DeparturePointPair>> & evaluated_
   });
 }
 
+bool is_departure_free(const Side<std::optional<DeparturePointPair>> & evaluated_projections)
+{
+  // A side always carries its closest projection, so emptiness is not the test. Only a NONE type
+  // means the footprint stays outside the near boundary threshold on that side.
+  return evaluated_projections.all_of_side([](const auto & departure_pair_opt) {
+    return !departure_pair_opt.has_value() ||
+           departure_pair_opt->physical_departure_point.is_none_departure();
+  });
+}
+
 double get_min_lateral_distance_to_bound(
   const Side<std::optional<DeparturePointPair>> & evaluated_projections)
 {

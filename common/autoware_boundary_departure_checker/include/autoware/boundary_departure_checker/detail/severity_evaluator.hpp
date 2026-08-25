@@ -89,6 +89,13 @@ double get_min_lateral_distance_to_bound(
   const Side<std::optional<DeparturePointPair>> & evaluated_projections);
 
 /**
+ * @brief Check if both sides are clear of any departure.
+ * @param[in] evaluated_projections evaluated critical point pairs for both sides
+ * @return true if no side has a departure of any type
+ */
+bool is_departure_free(const Side<std::optional<DeparturePointPair>> & evaluated_projections);
+
+/**
  * @brief Calculate minimum braking distance.
  * @param[in] ego_state current ego dynamic state
  * @param[in] param checker parameters
