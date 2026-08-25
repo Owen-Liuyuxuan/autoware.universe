@@ -545,20 +545,20 @@ TEST(OutputConversion, OverwritesOnlyAvailablePostStepSamples)
   EXPECT_DOUBLE_EQ(output.points[0].pose.position.z, input.points[0].pose.position.z);
   EXPECT_NEAR(tf2::getYaw(output.points[0].pose.orientation), 0.3, 1.0E-6);
   EXPECT_FLOAT_EQ(output.points[0].longitudinal_velocity_mps, 4.0F);
-  EXPECT_FLOAT_EQ(output.points[0].acceleration_mps2, 0.7F);
-  EXPECT_FLOAT_EQ(output.points[0].front_wheel_angle_rad, 0.1F);
+  EXPECT_FLOAT_EQ(output.points[0].acceleration_mps2, controls[0].accel_cmd);
+  EXPECT_FLOAT_EQ(output.points[0].front_wheel_angle_rad, controls[0].steer_cmd);
   EXPECT_FLOAT_EQ(output.points[0].lateral_velocity_mps, input.points[0].lateral_velocity_mps);
   EXPECT_TRUE(output.points[2] == input.points[2]);
 }
 
-TEST(EngageVelocity, ChangesOnlyTheFirstTwoPointsWhenMovementIsRequested)
+TEST(EngageVelocity, ChangesAllLeadingStoppedPointsWhenMovementIsRequested)
 {
   auto trajectory = makeTrajectory(4U, 1.0, 0.0F);
   trajectory.points[3].longitudinal_velocity_mps = 1.0F;
   setInitialEngageVelocity(trajectory);
   EXPECT_FLOAT_EQ(trajectory.points[0].longitudinal_velocity_mps, 0.25F);
   EXPECT_FLOAT_EQ(trajectory.points[1].longitudinal_velocity_mps, 0.25F);
-  EXPECT_FLOAT_EQ(trajectory.points[2].longitudinal_velocity_mps, 0.0F);
+  EXPECT_FLOAT_EQ(trajectory.points[2].longitudinal_velocity_mps, 0.25F);
 
   auto stopping = makeTrajectory(4U, 1.0, 0.0F);
   setInitialEngageVelocity(stopping);
@@ -570,12 +570,14 @@ TEST(EngageVelocity, ChangesOnlyTheFirstTwoPointsWhenMovementIsRequested)
   setInitialEngageVelocity(externally_stopped, 0.0F);
   EXPECT_FLOAT_EQ(externally_stopped.points[0].longitudinal_velocity_mps, 0.0F);
   EXPECT_FLOAT_EQ(externally_stopped.points[1].longitudinal_velocity_mps, 0.0F);
+  EXPECT_FLOAT_EQ(externally_stopped.points[2].longitudinal_velocity_mps, 0.0F);
 
   auto externally_limited = makeTrajectory(4U, 1.0, 0.0F);
   externally_limited.points[3].longitudinal_velocity_mps = 1.0F;
   setInitialEngageVelocity(externally_limited, 0.1F);
   EXPECT_FLOAT_EQ(externally_limited.points[0].longitudinal_velocity_mps, 0.1F);
   EXPECT_FLOAT_EQ(externally_limited.points[1].longitudinal_velocity_mps, 0.1F);
+  EXPECT_FLOAT_EQ(externally_limited.points[2].longitudinal_velocity_mps, 0.1F);
 }
 
 }  // namespace

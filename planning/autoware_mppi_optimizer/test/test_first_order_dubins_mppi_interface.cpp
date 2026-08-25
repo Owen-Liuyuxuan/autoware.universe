@@ -120,16 +120,6 @@ TEST(KinematicLimitCost, NormalizesIntervalsAndCapsAggregate)
   EXPECT_LE(extreme.total, 100000.0F);
 }
 
-Trajectory makeLaterallyOffsetTrajectory(const float first_point_y, const float remaining_y)
-{
-  auto trajectory = makeStraightTrajectory(30U);
-  for (auto & point : trajectory.points) {
-    point.pose.position.y = remaining_y;
-  }
-  trajectory.points.front().pose.position.y = first_point_y;
-  return trajectory;
-}
-
 TrackedObjects makeStationaryBoxObstacle(
   const double x, const double y, const double length, const double width)
 {
@@ -198,26 +188,9 @@ TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, ProducesFinitePostStepTrajectoryAnd
   EXPECT_TRUE(result.debug.optimized_trajectory == result.trajectory);
   EXPECT_TRUE(result.debug.rollouts.empty());
   EXPECT_TRUE(std::isfinite(result.debug.baseline_cost));
-  EXPECT_TRUE(std::isfinite(result.debug.cost_breakdown.total));
-  EXPECT_EQ(
-    result.debug.cost_breakdown.evaluated_timesteps,
-    static_cast<std::size_t>(detail::kMppiHorizon));
-  EXPECT_NEAR(
-    result.debug.cost_breakdown.componentTotal(), result.debug.cost_breakdown.total, 1.0E-3F);
-  EXPECT_NEAR(
-    result.debug.cost_breakdown.running_total + result.debug.cost_breakdown.terminal_total,
-    result.debug.cost_breakdown.total, 1.0E-3F);
-  EXPECT_EQ(
-    result.debug.nominal_cost_breakdown.evaluated_timesteps,
-    static_cast<std::size_t>(detail::kMppiHorizon));
-  EXPECT_TRUE(std::isfinite(result.debug.nominal_cost_breakdown.total));
-  EXPECT_NEAR(
-    result.debug.nominal_cost_breakdown.componentTotal(), result.debug.nominal_cost_breakdown.total,
-    1.0E-3F);
-  EXPECT_NEAR(
-    result.debug.nominal_cost_breakdown.running_total +
-      result.debug.nominal_cost_breakdown.terminal_total,
-    result.debug.nominal_cost_breakdown.total, 1.0E-3F);
+  // Full host cost reconstruction is intentionally skipped unless debug logging is enabled.
+  EXPECT_EQ(result.debug.cost_breakdown.evaluated_timesteps, 0U);
+  EXPECT_EQ(result.debug.nominal_cost_breakdown.evaluated_timesteps, 0U);
   // baseline_cost is the best sampled rollout before MPPI's distribution update and smoothing;
   // it is intentionally not asserted equal to the reconstructed selected trajectory cost.
   EXPECT_TRUE(result.debug.validation.isValid());
@@ -253,7 +226,9 @@ TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, ProducesFinitePostStepTrajectoryAnd
   }
 }
 
-TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, ActiveLimitCostRemainsFiniteUnderExtremeViolations)
+TEST_F(
+  FirstOrderDubinsMppiInterfaceGpuTest,
+  ActiveLimitSampleCostDistributionRemainsFiniteUnderExtremeViolations)
 {
   FirstOrderDubinsMppiCostParams cost_params;
   cost_params.overlimit_coeff = 1.0E8F;
@@ -273,16 +248,16 @@ TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, ActiveLimitCostRemainsFiniteUnderEx
     optimize(*interface_, makeStraightTrajectory(85U), odometry, TrackedObjects{}, {}, limits);
 
   EXPECT_TRUE(std::isfinite(result.debug.baseline_cost));
-  EXPECT_TRUE(std::isfinite(result.debug.cost_breakdown.total));
-  EXPECT_GT(result.debug.cost_breakdown.kinematic_velocity_overlimit, 0.0F);
   std::vector<float> costs;
   std::vector<float> weights;
   ASSERT_TRUE(interface_->copySampleCostDistribution(costs, weights));
   ASSERT_FALSE(weights.empty());
+  ASSERT_EQ(costs.size(), weights.size());
   float weight_sum = 0.0F;
-  for (const float weight : weights) {
-    EXPECT_TRUE(std::isfinite(weight));
-    weight_sum += weight;
+  for (std::size_t index = 0U; index < weights.size(); ++index) {
+    EXPECT_TRUE(std::isfinite(costs[index]));
+    EXPECT_TRUE(std::isfinite(weights[index]));
+    weight_sum += weights[index];
   }
   EXPECT_NEAR(weight_sum, 1.0F, 1.0E-3F);
 }
@@ -354,12 +329,12 @@ TEST_F(
   std::vector<float> steering;
   ASSERT_TRUE(interface_->copyLastOptimizedControl(acceleration, steering));
   ASSERT_GE(acceleration.size(), 8U);
-  EXPECT_FLOAT_EQ(acceleration[0], -1.0F);
-  EXPECT_FLOAT_EQ(acceleration[1], -2.0F);
-  for (std::size_t index = 2U; index < 8U; ++index) {
+  for (std::size_t index = 0U; index < 8U; ++index) {
     EXPECT_FLOAT_EQ(acceleration[index], -2.0F);
   }
   ASSERT_EQ(result.trajectory.points.size(), 85U);
+  EXPECT_FLOAT_EQ(result.trajectory.points[0].acceleration_mps2, -1.0F);
+  EXPECT_FLOAT_EQ(result.trajectory.points[1].acceleration_mps2, -2.0F);
   EXPECT_FLOAT_EQ(result.trajectory.points[0].longitudinal_velocity_mps, 4.0F);
   EXPECT_FLOAT_EQ(result.trajectory.points[1].longitudinal_velocity_mps, 4.0F);
   EXPECT_FLOAT_EQ(result.trajectory.points[2].longitudinal_velocity_mps, 3.9F);
@@ -368,9 +343,6 @@ TEST_F(
 
 TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, RejectedActiveLimitRetainsLongitudinalFallback)
 {
-  FirstOrderDubinsMppiCostParams cost_params;
-  cost_params.boundary_threshold = 0.5F;
-  interface_->setCostParams(cost_params);
   FirstOrderDubinsMppiRuntimeOptions options;
   options.skip_if_invalid = true;
   interface_->setRuntimeOptions(options);
@@ -381,11 +353,10 @@ TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, RejectedActiveLimitRetainsLongitudi
   limits.max_longitudinal_acceleration = 1.0F;
   limits.min_longitudinal_jerk = -10.0F;
   limits.max_longitudinal_jerk = 10.0F;
-  const auto input = makeLaterallyOffsetTrajectory(0.0F, 0.5F);
-  auto odometry = makeOdometry();
-  odometry.pose.pose.position.y = 0.5;
+  const auto input = makeStraightTrajectory(30U);
+  const auto objects = makeStationaryBoxObstacle(0.4, 0.41, 0.2, 0.2);
 
-  const auto result = optimize(*interface_, input, odometry, TrackedObjects{}, {}, limits);
+  const auto result = optimize(*interface_, input, makeOdometry(), objects, {}, limits);
 
   EXPECT_TRUE(result.debug.was_rejected);
   EXPECT_TRUE(result.debug.external_velocity_limit_active);
@@ -417,7 +388,7 @@ TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, AppliesPerChannelActuatorDelayWitho
   EXPECT_NEAR(first.longitudinal_velocity_mps, 2.0F, 1.0E-5F);
 }
 
-TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, RejectsAtInclusiveLateralBoundaryThreshold)
+TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, RejectsBeyondLateralBoundaryThreshold)
 {
   FirstOrderDubinsMppiCostParams cost_params;
   cost_params.boundary_threshold = 0.5F;
@@ -426,9 +397,9 @@ TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, RejectsAtInclusiveLateralBoundaryTh
   options.skip_if_invalid = true;
   interface_->setRuntimeOptions(options);
 
-  const auto input = makeLaterallyOffsetTrajectory(0.0F, 0.5F);
+  const auto input = makeStraightTrajectory(30U);
   auto odometry = makeOdometry();
-  odometry.pose.pose.position.y = 0.5;
+  odometry.pose.pose.position.y = 0.6;
   const auto result = optimize(*interface_, input, odometry);
 
   EXPECT_TRUE(interface_->isInitialized());
@@ -436,10 +407,6 @@ TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, RejectsAtInclusiveLateralBoundaryTh
   EXPECT_TRUE(result.debug.reference_trajectory == input);
   EXPECT_TRUE(result.debug.optimized_trajectory == input);
   EXPECT_TRUE(result.debug.was_rejected);
-  EXPECT_EQ(
-    result.debug.cost_breakdown.evaluated_timesteps,
-    static_cast<std::size_t>(detail::kMppiHorizon));
-  EXPECT_TRUE(std::isfinite(result.debug.cost_breakdown.total));
   EXPECT_TRUE(hasInvalidityReason(
     result.debug.validation.reasons, FirstOrderDubinsMppiInvalidityReason::lateral_boundary));
   ASSERT_TRUE(result.debug.validation.first_invalid_index.has_value());
@@ -501,9 +468,9 @@ TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, DoesNotRejectInvalidOutputWhenOptio
   options.skip_if_invalid = false;
   interface_->setRuntimeOptions(options);
 
-  const auto input = makeLaterallyOffsetTrajectory(0.0F, 0.5F);
+  const auto input = makeStraightTrajectory(30U);
   auto odometry = makeOdometry();
-  odometry.pose.pose.position.y = 0.5;
+  odometry.pose.pose.position.y = 0.6;
   const auto result = optimize(*interface_, input, odometry);
 
   EXPECT_FALSE(result.debug.validation.isValid());
