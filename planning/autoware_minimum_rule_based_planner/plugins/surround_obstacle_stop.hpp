@@ -18,7 +18,7 @@
 #include "autoware/obstacle_proximity_checker/obstacle_proximity_checker.hpp"
 #include "plugin_interface.hpp"
 
-#include <autoware/trajectory_modifier/trajectory_modifier_utils/obstacle_stop_utils.hpp>
+#include <autoware/trajectory_processor/trajectory_modifier_utils/obstacle_stop_utils.hpp>
 #include <rclcpp/rclcpp.hpp>
 
 #include <autoware_internal_debug_msgs/msg/string_stamped.hpp>
