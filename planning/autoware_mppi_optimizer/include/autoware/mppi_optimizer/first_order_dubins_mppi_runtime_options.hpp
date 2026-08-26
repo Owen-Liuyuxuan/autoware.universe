@@ -36,6 +36,12 @@ struct FirstOrderDubinsMppiRuntimeOptions
   /** Warm-start u_nom from shifted previous optimized controls (else reseed from DP each cycle).
    *  With use_temporal_mpt_as_nominal, seeds the t-MPT NLP instead of replacing u_nom. */
   bool use_last_control_as_nominal{false};
+  /** Reject a shifted warm start when its obstacle/road-border cost is unsafe. */
+  bool enable_dynamic_reseeding{true};
+  float dynamic_reseed_obstacle_cost_threshold{0.0F};
+  float dynamic_reseed_road_border_cost_threshold{0.0F};
+  /** Fraction of GPU samples replaced by deterministic hard-brake/evasive modes. */
+  float evasive_rollout_fraction{0.0625F};
   /**
    * When true (and not forced nominal), seed u_nom from acados temporal MPT
    * instead of the geometric diffusion seed. Falls back to diffusion seed on solve failure.
@@ -49,6 +55,15 @@ struct FirstOrderDubinsMppiRuntimeOptions
    * Vehicle τ (first-order lag) is unchanged. Default true preserves delay compensation.
    */
   bool enable_input_delay_compensation{true};
+  /** Close GPU rollouts around the nominal state sequence with proportional feedback. */
+  bool enable_tube_feedback{true};
+  float tube_velocity_gain{0.5F};
+  float tube_acceleration_gain{0.2F};
+  float tube_lateral_position_gain{0.8F};
+  float tube_yaw_gain{1.0F};
+  float tube_steering_gain{0.5F};
+  /** Gain applied to measured-vs-predicted steering residual across pending delay taps. */
+  float steer_delay_residual_gain{1.0F};
 };
 
 }  // namespace autoware::mppi_optimizer

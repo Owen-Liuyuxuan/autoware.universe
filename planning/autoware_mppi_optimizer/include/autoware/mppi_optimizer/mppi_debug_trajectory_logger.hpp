@@ -226,11 +226,24 @@ public:
       out << "min_optimization_length," << options.min_optimization_length << "\n";
       out << "use_last_control_as_nominal," << (options.use_last_control_as_nominal ? 1 : 0)
           << "\n";
+      out << "enable_dynamic_reseeding," << (options.enable_dynamic_reseeding ? 1 : 0) << "\n";
+      out << "dynamic_reseed_obstacle_cost_threshold,"
+          << options.dynamic_reseed_obstacle_cost_threshold << "\n";
+      out << "dynamic_reseed_road_border_cost_threshold,"
+          << options.dynamic_reseed_road_border_cost_threshold << "\n";
+      out << "evasive_rollout_fraction," << options.evasive_rollout_fraction << "\n";
       out << "use_temporal_mpt_as_nominal," << (options.use_temporal_mpt_as_nominal ? 1 : 0)
           << "\n";
       out << "prevent_reverse_velocity," << (options.prevent_reverse_velocity ? 1 : 0) << "\n";
       out << "enable_input_delay_compensation," << (options.enable_input_delay_compensation ? 1 : 0)
           << "\n";
+      out << "enable_tube_feedback," << (options.enable_tube_feedback ? 1 : 0) << "\n";
+      out << "tube_velocity_gain," << options.tube_velocity_gain << "\n";
+      out << "tube_acceleration_gain," << options.tube_acceleration_gain << "\n";
+      out << "tube_lateral_position_gain," << options.tube_lateral_position_gain << "\n";
+      out << "tube_yaw_gain," << options.tube_yaw_gain << "\n";
+      out << "tube_steering_gain," << options.tube_steering_gain << "\n";
+      out << "steer_delay_residual_gain," << options.steer_delay_residual_gain << "\n";
     }
     runtime_written_ = true;
   }

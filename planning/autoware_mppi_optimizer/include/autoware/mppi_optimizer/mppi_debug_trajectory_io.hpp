@@ -407,6 +407,12 @@ inline bool loadMppiDebugRuntimeOptionsCsv(
   if (min_optimization_length_it != kv.end()) {
     options.min_optimization_length = min_optimization_length_it->second;
   }
+  const auto assign_float = [&kv](const char * key, float & value) {
+    const auto it = kv.find(key);
+    if (it != kv.end()) {
+      value = it->second;
+    }
+  };
   options.ignore_obstacles = as_bool("ignore_obstacles", options.ignore_obstacles);
   options.ignore_road_borders = as_bool("ignore_road_borders", options.ignore_road_borders);
   options.ignore_drivable_area = as_bool("ignore_drivable_area", options.ignore_drivable_area);
@@ -415,12 +421,26 @@ inline bool loadMppiDebugRuntimeOptionsCsv(
   options.skip_if_invalid = as_bool("skip_if_invalid", options.skip_if_invalid);
   options.use_last_control_as_nominal =
     as_bool("use_last_control_as_nominal", options.use_last_control_as_nominal);
+  options.enable_dynamic_reseeding =
+    as_bool("enable_dynamic_reseeding", options.enable_dynamic_reseeding);
+  assign_float(
+    "dynamic_reseed_obstacle_cost_threshold", options.dynamic_reseed_obstacle_cost_threshold);
+  assign_float(
+    "dynamic_reseed_road_border_cost_threshold", options.dynamic_reseed_road_border_cost_threshold);
+  assign_float("evasive_rollout_fraction", options.evasive_rollout_fraction);
   options.use_temporal_mpt_as_nominal =
     as_bool("use_temporal_mpt_as_nominal", options.use_temporal_mpt_as_nominal);
   options.prevent_reverse_velocity =
     as_bool("prevent_reverse_velocity", options.prevent_reverse_velocity);
   options.enable_input_delay_compensation =
     as_bool("enable_input_delay_compensation", options.enable_input_delay_compensation);
+  options.enable_tube_feedback = as_bool("enable_tube_feedback", options.enable_tube_feedback);
+  assign_float("tube_velocity_gain", options.tube_velocity_gain);
+  assign_float("tube_acceleration_gain", options.tube_acceleration_gain);
+  assign_float("tube_lateral_position_gain", options.tube_lateral_position_gain);
+  assign_float("tube_yaw_gain", options.tube_yaw_gain);
+  assign_float("tube_steering_gain", options.tube_steering_gain);
+  assign_float("steer_delay_residual_gain", options.steer_delay_residual_gain);
   return true;
 }
 

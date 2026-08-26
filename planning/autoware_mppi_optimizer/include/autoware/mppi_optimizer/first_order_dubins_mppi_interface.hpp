@@ -228,6 +228,8 @@ struct FirstOrderDubinsMppiDebug
   std::vector<std::optional<float>> effective_max_velocity_by_reference_point;
   /** True when skip_if_invalid replaced the optimized trajectory with the input trajectory. */
   bool was_rejected{false};
+  /** True when current obstacle/border costs forced a shifted warm start to be cold-reseeded. */
+  bool warm_start_was_rejected{false};
 };
 
 struct FirstOrderDubinsMppiOptimizationResult

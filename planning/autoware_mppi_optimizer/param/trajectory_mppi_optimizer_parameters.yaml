@@ -267,6 +267,70 @@ trajectory_mppi_optimizer:
     default_value: true
     description: Warm start with the previous optimized control
     read_only: false
+  enable_dynamic_reseeding:
+    type: bool
+    default_value: true
+    description: Reject unsafe shifted warm starts using obstacle and road-border costs
+    read_only: false
+  dynamic_reseed_obstacle_cost_threshold:
+    type: double
+    default_value: 0.0
+    description: Maximum obstacle cost allowed for a shifted nominal warm start
+    validation: { gt_eq<>: [0.0] }
+    read_only: false
+  dynamic_reseed_road_border_cost_threshold:
+    type: double
+    default_value: 0.0
+    description: Maximum road-border cost allowed for a shifted nominal warm start
+    validation: { gt_eq<>: [0.0] }
+    read_only: false
+  evasive_rollout_fraction:
+    type: double
+    default_value: 0.0625
+    description: Fraction of MPPI rollouts reserved for deterministic evasive controls
+    validation: { bounds<>: [0.0, 0.1] }
+    read_only: false
+  enable_tube_feedback:
+    type: bool
+    default_value: true
+    description: Apply proportional Tube-MPPI feedback during GPU rollouts
+    read_only: false
+  tube_velocity_gain:
+    type: double
+    default_value: 0.5
+    description: Tube feedback velocity-error gain
+    validation: { gt_eq<>: [0.0] }
+    read_only: false
+  tube_acceleration_gain:
+    type: double
+    default_value: 0.2
+    description: Tube feedback acceleration-state-error gain
+    validation: { gt_eq<>: [0.0] }
+    read_only: false
+  tube_lateral_position_gain:
+    type: double
+    default_value: 0.8
+    description: Tube feedback lateral-position-error gain
+    validation: { gt_eq<>: [0.0] }
+    read_only: false
+  tube_yaw_gain:
+    type: double
+    default_value: 1.0
+    description: Tube feedback yaw-error gain
+    validation: { gt_eq<>: [0.0] }
+    read_only: false
+  tube_steering_gain:
+    type: double
+    default_value: 0.5
+    description: Tube feedback steering-state-error gain
+    validation: { gt_eq<>: [0.0] }
+    read_only: false
+  steer_delay_residual_gain:
+    type: double
+    default_value: 1.0
+    description: Measured steering residual gain distributed across pending delay taps
+    validation: { bounds<>: [0.0, 1.0] }
+    read_only: false
   enable_debug_trajectory_log:
     type: bool
     default_value: false

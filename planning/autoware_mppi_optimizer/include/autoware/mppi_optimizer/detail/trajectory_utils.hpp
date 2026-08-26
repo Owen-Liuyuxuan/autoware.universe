@@ -125,6 +125,16 @@ void applyActiveVelocityLimitProfile(
   const FirstOrderDubinsMppiVehicleParams & vehicle_params, int horizon = kMppiHorizon,
   float min_chord_length_m = 1.5F);
 
+/**
+ * Convert geometric desired actuator states into commands by inverse first-order dynamics, while
+ * forward-simulating the actuator state. The resulting steering evolution respects both
+ * steer_time_constant and steer_rate_lim from the measured initial steering angle.
+ */
+[[nodiscard]] std::vector<FirstOrderDubinsMppiControl> filterNominalControlForActuatorDynamics(
+  const std::vector<FirstOrderDubinsMppiControl> & geometric_nominal,
+  const InitialState & initial_state, const FirstOrderDubinsMppiVehicleParams & vehicle_params,
+  float dt = kMppiDt);
+
 [[nodiscard]] std::vector<FirstOrderDubinsMppiControl> buildForcedNominalControl(
   const std::vector<float> & acceleration_commands, const std::vector<float> & steering_commands,
   const FirstOrderDubinsMppiVehicleParams & vehicle_params, int horizon = kMppiHorizon);

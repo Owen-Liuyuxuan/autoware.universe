@@ -552,6 +552,27 @@ TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, RejectsObjectInsideConfiguredMargin
   EXPECT_EQ(result.debug.validation.first_invalid_index.value(), 0U);
 }
 
+TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, ColdReseedsUnsafeShiftedNominal)
+{
+  FirstOrderDubinsMppiRuntimeOptions options;
+  options.use_last_control_as_nominal = true;
+  options.use_temporal_mpt_as_nominal = false;
+  options.enable_dynamic_reseeding = true;
+  options.dynamic_reseed_obstacle_cost_threshold = 0.0F;
+  options.evasive_rollout_fraction = 0.0F;
+  options.enable_tube_feedback = false;
+  options.skip_if_invalid = false;
+  interface_->setRuntimeOptions(options);
+
+  const auto input = makeStraightTrajectory(85U);
+  const auto first = optimize(*interface_, input);
+  EXPECT_FALSE(first.debug.warm_start_was_rejected);
+
+  const auto obstacle = makeStationaryBoxObstacle(0.4, 0.0, 0.5, 0.5);
+  const auto second = optimize(*interface_, input, makeOdometry(), obstacle);
+  EXPECT_TRUE(second.debug.warm_start_was_rejected);
+}
+
 TEST_F(FirstOrderDubinsMppiInterfaceGpuTest, DoesNotRejectInvalidOutputWhenOptionIsDisabled)
 {
   FirstOrderDubinsMppiCostParams cost_params;

@@ -15,6 +15,7 @@
 #include "autoware/mppi_optimizer/detail/trajectory_validator.hpp"
 
 #include <mppi/cost_functions/dubins/first_order_dubins_bicycle_cost.cuh>
+#include <mppi/feedback_controllers/zero_feedback.cuh>
 
 #include <cuda_runtime_api.h>
 #include <gtest/gtest.h>
@@ -36,6 +37,23 @@ using TestCost = FirstOrderDubinsBicycleCost<kTestHorizon>;
 using TestCostParams = FirstOrderDubinsBicycleCostParams<kTestHorizon>;
 using OutputIndex = FirstOrderDubinsBicycleParams::OutputIndex;
 using ControlIndex = FirstOrderDubinsBicycleParams::ControlIndex;
+
+TEST(FirstOrderDubinsFeedbackTest, CorrectsVelocityAndLateralErrorsTowardNominal)
+{
+  FirstOrderDubinsFeedbackGains gains;
+  std::array<float, FirstOrderDubinsBicycleParams::kTubeFeedbackStateDim> actual{};
+  std::array<float, FirstOrderDubinsBicycleParams::kTubeFeedbackStateDim> goal{};
+  std::array<float, static_cast<int>(ControlIndex::NUM_CONTROLS)> correction{};
+  goal[static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::VEL_X)] = 2.0F;
+  actual[static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::VEL_X)] = 1.0F;
+  actual[static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::POS_Y)] = 1.0F;
+  actual[static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::YAW)] = 0.1F;
+
+  computeFirstOrderDubinsFeedback(gains, actual.data(), goal.data(), correction.data());
+
+  EXPECT_GT(correction[static_cast<int>(ControlIndex::ACCELERATION_CMD)], 0.0F);
+  EXPECT_LT(correction[static_cast<int>(ControlIndex::STEER_CMD)], 0.0F);
+}
 
 class TrajectoryValidatorTest : public ::testing::Test
 {

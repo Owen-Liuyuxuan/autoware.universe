@@ -17,6 +17,7 @@
 #define MPPIGENERIC_FIRST_ORDER_DUBINS_BICYCLE_CUH
 
 #include <mppi/dynamics/dynamics.cuh>
+#include <mppi/feedback_controllers/zero_feedback.cuh>
 #include <mppi/utils/angle_utils.cuh>
 
 #include <cmath>
@@ -25,6 +26,10 @@ struct FirstOrderDubinsBicycleParams : public DynamicsParams
 {
   /** Max discrete dead-time taps per channel (covers τ up to ~0.8 s at dt=0.1). */
   static constexpr int kMaxInputDelaySteps = 8;
+  /** Fixed capacity for the package-owned Tube-MPPI nominal state reference. */
+  static constexpr int kMaxTubeFeedbackSteps = 128;
+  /** Only the physical plant states (through ACCELERATION) are used by feedback. */
+  static constexpr int kTubeFeedbackStateDim = 6;
   /** Fixed MPPI integration period used by the reverse-velocity control constraint. */
   static constexpr float kControlDt = 0.1F;
 
@@ -89,6 +94,12 @@ struct FirstOrderDubinsBicycleParams : public DynamicsParams
   /** Discrete ZOH delay steps (0 = no delay). Clamped to [0, kMaxInputDelaySteps]. */
   int acc_delay_steps = 0;
   int steer_delay_steps = 0;
+  /** Apply proportional tube feedback to sampled controls inside the rollout dynamics. */
+  bool tube_feedback_enabled = false;
+  int tube_feedback_steps = 0;
+  FirstOrderDubinsFeedbackGains tube_feedback_gains{};
+  /** Row-major [time][VEL_X..ACCELERATION] nominal pre-step states. */
+  float tube_feedback_reference[kMaxTubeFeedbackSteps * kTubeFeedbackStateDim]{};
 };
 
 static_assert(

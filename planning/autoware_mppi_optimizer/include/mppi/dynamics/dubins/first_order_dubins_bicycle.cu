@@ -17,6 +17,38 @@ __host__ __device__ inline int steerDelayTapIndex(const int i)
   return static_cast<int>(S::STEER_CMD_D0) + i;
 }
 
+/** Apply the same feedback law as FirstOrderDubinsFeedback to one rollout control. */
+__host__ __device__ void applyTubeFeedback(
+  const FirstOrderDubinsBicycleParams & p, const float * state, float * control, const int timestep)
+{
+  if (!p.tube_feedback_enabled || p.tube_feedback_steps <= 0) {
+    return;
+  }
+  const int last_step = p.tube_feedback_steps - 1;
+  const int reference_step = timestep < 0 ? 0 : (timestep > last_step ? last_step : timestep);
+  const int reference_offset =
+    reference_step * FirstOrderDubinsBicycleParams::kTubeFeedbackStateDim;
+  const float * goal = &p.tube_feedback_reference[reference_offset];
+  float correction[static_cast<int>(C::NUM_CONTROLS)] = {0.0F, 0.0F};
+  computeFirstOrderDubinsFeedback(p.tube_feedback_gains, state, goal, correction);
+
+  const int acceleration_index = static_cast<int>(C::ACCELERATION_CMD);
+  const int steering_index = static_cast<int>(C::STEER_CMD);
+  control[acceleration_index] = fmaxf(
+    fminf(control[acceleration_index] + correction[acceleration_index], p.max_accel), p.min_accel);
+  control[steering_index] = fmaxf(
+    fminf(control[steering_index] + correction[steering_index], p.max_steer_angle),
+    -p.max_steer_angle);
+  if (
+    p.prevent_reverse_velocity && state[static_cast<int>(S::VEL_X)] >= 0.0F &&
+    state[static_cast<int>(S::VEL_X)] +
+        control[acceleration_index] * FirstOrderDubinsBicycleParams::kControlDt <
+      0.0F) {
+    control[acceleration_index] =
+      -state[static_cast<int>(S::VEL_X)] / FirstOrderDubinsBicycleParams::kControlDt;
+  }
+}
+
 /** Resolve plant-facing commands: front of each delay pipe, or raw u when N=0. */
 __host__ __device__ void resolveDelayedControl(
   const FirstOrderDubinsBicycleParams & p, const float * state, const float * control,
@@ -160,11 +192,13 @@ template <class CLASS_T, class PARAMS_T>
 void FirstOrderDubinsBicycleImpl<CLASS_T, PARAMS_T>::step(
   Eigen::Ref<state_array> state, Eigen::Ref<state_array> next_state,
   Eigen::Ref<state_array> state_der, const Eigen::Ref<const control_array> & control,
-  Eigen::Ref<output_array> output, const float /*t*/, const float dt)
+  Eigen::Ref<output_array> output, const float t, const float dt)
 {
-  this->computeStateDeriv(state, control, state_der);
+  control_array corrected_control = control;
+  applyTubeFeedback(this->params_, state.data(), corrected_control.data(), static_cast<int>(t));
+  this->computeStateDeriv(state, corrected_control, state_der);
   this->updateState(state, next_state, state_der, dt);
-  advanceInputDelayPipes(this->params_, state.data(), next_state.data(), control.data());
+  advanceInputDelayPipes(this->params_, state.data(), next_state.data(), corrected_control.data());
   this->stateToOutput(next_state, output);
 }
 
@@ -207,8 +241,12 @@ __device__ void FirstOrderDubinsBicycleImpl<CLASS_T, PARAMS_T>::updateState(
 template <class CLASS_T, class PARAMS_T>
 __device__ void FirstOrderDubinsBicycleImpl<CLASS_T, PARAMS_T>::step(
   float * state, float * next_state, float * state_der, float * control, float * output,
-  float * theta_s, const float /*t*/, const float dt)
+  float * theta_s, const float t, const float dt)
 {
+  if (threadIdx.y == 0) {
+    applyTubeFeedback(this->params_, state, control, static_cast<int>(t));
+  }
+  __syncthreads();
   this->computeStateDeriv(state, control, state_der, theta_s);
   __syncthreads();
   this->updateState(state, next_state, state_der, dt);

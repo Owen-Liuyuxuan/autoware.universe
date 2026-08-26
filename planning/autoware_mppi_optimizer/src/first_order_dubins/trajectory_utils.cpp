@@ -526,6 +526,65 @@ std::vector<FirstOrderDubinsMppiControl> buildDiffusionNominalControl(
   return nominal;
 }
 
+std::vector<FirstOrderDubinsMppiControl> filterNominalControlForActuatorDynamics(
+  const std::vector<FirstOrderDubinsMppiControl> & geometric_nominal,
+  const InitialState & initial_state, const FirstOrderDubinsMppiVehicleParams & vehicle_params,
+  const float dt)
+{
+  if (geometric_nominal.empty()) {
+    return {};
+  }
+
+  const float safe_dt = std::isfinite(dt) ? std::max(dt, 1.0E-4F) : kMppiDt;
+  const float acceleration_time_constant = std::isfinite(vehicle_params.acc_time_constant)
+                                             ? std::max(vehicle_params.acc_time_constant, 1.0E-4F)
+                                             : 1.0E-4F;
+  const float steering_time_constant = std::isfinite(vehicle_params.steer_time_constant)
+                                         ? std::max(vehicle_params.steer_time_constant, 1.0E-4F)
+                                         : 1.0E-4F;
+  const float maximum_steering_rate = std::isfinite(vehicle_params.steer_rate_lim)
+                                        ? std::max(vehicle_params.steer_rate_lim, 0.0F)
+                                        : 0.0F;
+  const float maximum_steering_step = maximum_steering_rate * safe_dt;
+
+  float acceleration_state =
+    std::clamp(initial_state.acceleration, vehicle_params.min_accel(), vehicle_params.max_accel());
+  float steering_state = std::clamp(
+    initial_state.steering, -vehicle_params.max_steer_angle, vehicle_params.max_steer_angle);
+  auto filtered = geometric_nominal;
+  for (std::size_t index = 0; index < filtered.size(); ++index) {
+    const float desired_acceleration = std::clamp(
+      geometric_nominal[index].accel_cmd, vehicle_params.min_accel(), vehicle_params.max_accel());
+    const float acceleration_command = std::clamp(
+      acceleration_state +
+        acceleration_time_constant * (desired_acceleration - acceleration_state) / safe_dt,
+      vehicle_params.min_accel(), vehicle_params.max_accel());
+    filtered[index].accel_cmd = acceleration_command;
+    acceleration_state = std::clamp(
+      acceleration_state +
+        (acceleration_command - acceleration_state) / acceleration_time_constant * safe_dt,
+      vehicle_params.min_accel(), vehicle_params.max_accel());
+
+    const float desired_steering = std::clamp(
+      geometric_nominal[index].steer_cmd, -vehicle_params.max_steer_angle,
+      vehicle_params.max_steer_angle);
+    const float reachable_steering = std::clamp(
+      desired_steering, steering_state - maximum_steering_step,
+      steering_state + maximum_steering_step);
+    const float steering_command = std::clamp(
+      steering_state + steering_time_constant * (reachable_steering - steering_state) / safe_dt,
+      -vehicle_params.max_steer_angle, vehicle_params.max_steer_angle);
+    filtered[index].steer_cmd = steering_command;
+    const float steering_rate = std::clamp(
+      (steering_command - steering_state) / steering_time_constant, -maximum_steering_rate,
+      maximum_steering_rate);
+    steering_state = std::clamp(
+      steering_state + steering_rate * safe_dt, -vehicle_params.max_steer_angle,
+      vehicle_params.max_steer_angle);
+  }
+  return filtered;
+}
+
 std::vector<FirstOrderDubinsMppiControl> buildForcedNominalControl(
   const std::vector<float> & acceleration_commands, const std::vector<float> & steering_commands,
   const FirstOrderDubinsMppiVehicleParams & vehicle_params, const int horizon)

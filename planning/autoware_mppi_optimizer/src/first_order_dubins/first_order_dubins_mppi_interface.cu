@@ -21,6 +21,7 @@
 #include "autoware/mppi_optimizer/tracked_objects_obstacles.hpp"
 
 #include <mppi/controllers/MPPI/mppi_controller.cuh>
+#include <mppi/core/mppi_common.cuh>
 #include <mppi/cost_functions/dubins/first_order_dubins_bicycle_cost.cuh>
 #include <mppi/cost_functions/dubins/first_order_dubins_bicycle_cost_bridge.hpp>
 #include <mppi/cost_functions/moving_car_obstacles.hpp>
@@ -64,6 +65,48 @@ constexpr int kNumRollouts = 8 * 1024;
 constexpr int kMaxVizRollouts = 256;
 constexpr int kMaxWorstVizRollouts = 128;
 constexpr char kLoggerName[] = "first_order_dubins_mppi";
+static_assert(
+  kMppiHorizon <= FirstOrderDubinsBicycleParams::kMaxTubeFeedbackSteps,
+  "Tube feedback reference capacity must cover the MPPI horizon");
+
+/** Replace the tail of the Gaussian sample set with deterministic emergency maneuver modes. */
+__global__ void injectEvasiveControlSamples(
+  float * control_samples, const int num_rollouts, const int horizon,
+  const int evasive_rollout_count, const float minimum_acceleration, const float maximum_steering)
+{
+  const int sample_offset = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total_values = evasive_rollout_count * horizon;
+  if (sample_offset >= total_values) {
+    return;
+  }
+
+  constexpr int kModeCount = 5;
+  constexpr int kAccelerationIndex =
+    static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::ACCELERATION_CMD);
+  constexpr int kSteeringIndex =
+    static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::STEER_CMD);
+  const int local_rollout = sample_offset / horizon;
+  const int timestep = sample_offset % horizon;
+  const int rollout = num_rollouts - evasive_rollout_count + local_rollout;
+  const int mode = local_rollout % kModeCount;
+
+  float steering = 0.0F;
+  if (mode == 1) {
+    steering = maximum_steering;
+  } else if (mode == 2) {
+    steering = -maximum_steering;
+  } else if (mode == 3) {
+    steering = timestep >= horizon / 8 ? maximum_steering : 0.0F;
+  } else if (mode == 4) {
+    steering = timestep >= horizon / 8 ? -maximum_steering : 0.0F;
+  }
+
+  const int control_offset =
+    (rollout * horizon + timestep) *
+    static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::NUM_CONTROLS);
+  control_samples[control_offset + kAccelerationIndex] = minimum_acceleration;
+  control_samples[control_offset + kSteeringIndex] = steering;
+}
 
 rclcpp::Logger mppiLogger()
 {
@@ -124,17 +167,71 @@ FirstOrderDubinsBicycleKinematicLimitData makeKinematicLimitCostData(
 
 using DYN = FirstOrderDubinsBicycle;
 using COST = FirstOrderDubinsBicycleCost<kRefHorizon>;
-using FB = ZeroFeedback<DYN, kMppiHorizon>;
+using FB = FirstOrderDubinsFeedback<DYN, kMppiHorizon>;
 
 #define USE_COLOURED_NOISE
 
+class EvasiveSampler;
 #ifdef USE_COLOURED_NOISE
-using SAMPLER = mppi::sampling_distributions::ColoredNoiseDistribution<DYN::DYN_PARAMS_T>;
+using EvasiveSamplerBase = mppi::sampling_distributions::ColoredNoiseDistributionImpl<
+  EvasiveSampler, mppi::sampling_distributions::ColoredNoiseParams, DYN::DYN_PARAMS_T>;
 #elif defined(USE_SMOOTH_MPPI)
-using SAMPLER = mppi::sampling_distributions::SmoothMPPIDistribution<DYN::DYN_PARAMS_T>;
+using EvasiveSamplerBase = mppi::sampling_distributions::SmoothMPPIDistributionImpl<
+  EvasiveSampler, mppi::sampling_distributions::SmoothMPPIParams, DYN::DYN_PARAMS_T>;
 #else
-using SAMPLER = mppi::sampling_distributions::GaussianDistribution<DYN::DYN_PARAMS_T>;
+using EvasiveSamplerBase = mppi::sampling_distributions::GaussianDistributionImpl<
+  EvasiveSampler, mppi::sampling_distributions::GaussianParams, DYN::DYN_PARAMS_T>;
 #endif
+
+/** Sampling-distribution adapter that preserves vendor MPPI and injects package-owned modes. */
+class EvasiveSampler : public EvasiveSamplerBase
+{
+public:
+  using SAMPLING_PARAMS_T = typename EvasiveSamplerBase::SAMPLING_PARAMS_T;
+
+  explicit EvasiveSampler(cudaStream_t stream = 0) : EvasiveSamplerBase(stream) {}
+  explicit EvasiveSampler(const SAMPLING_PARAMS_T & params, cudaStream_t stream = 0)
+  : EvasiveSamplerBase(params, stream)
+  {
+  }
+
+  void setEvasiveSampling(
+    const float rollout_fraction, const float minimum_acceleration, const float maximum_steering)
+  {
+    const float safe_fraction =
+      std::isfinite(rollout_fraction) ? std::clamp(rollout_fraction, 0.0F, 0.10F) : 0.0F;
+    evasive_rollout_count_ = std::clamp(
+      static_cast<int>(std::lround(safe_fraction * static_cast<float>(kNumRollouts))), 0,
+      kNumRollouts);
+    minimum_evasive_acceleration_ = minimum_acceleration;
+    maximum_evasive_steering_ = std::max(0.0F, maximum_steering);
+  }
+
+  void generateSamples(
+    const int & optimization_stride, const int & iteration_num, curandGenerator_t & generator,
+    const bool synchronize = true)
+  {
+    EvasiveSamplerBase::generateSamples(optimization_stride, iteration_num, generator, false);
+    if (evasive_rollout_count_ > 0) {
+      constexpr int kThreads = 256;
+      const int value_count = evasive_rollout_count_ * this->getNumTimesteps();
+      const int block_count = (value_count + kThreads - 1) / kThreads;
+      injectEvasiveControlSamples<<<block_count, kThreads, 0, this->stream_>>>(
+        this->getControlSample(0, 0, 0), this->getNumRollouts(), this->getNumTimesteps(),
+        evasive_rollout_count_, minimum_evasive_acceleration_, maximum_evasive_steering_);
+    }
+    if (synchronize) {
+      HANDLE_ERROR(cudaStreamSynchronize(this->stream_));
+    }
+  }
+
+private:
+  int evasive_rollout_count_{0};
+  float minimum_evasive_acceleration_{0.0F};
+  float maximum_evasive_steering_{0.0F};
+};
+
+using SAMPLER = EvasiveSampler;
 
 using Mppi = VanillaMPPIController<DYN, COST, FB, kMppiHorizon, kNumRollouts, SAMPLER>;
 using CostBreakdown = FirstOrderDubinsMppiCostBreakdown;
@@ -738,12 +835,21 @@ struct FirstOrderDubinsMppiInterface::Impl
   float min_optimization_length{0.0F};
   /** Warm-start u_nom from shifted previous u_opt when available. */
   bool use_last_control_as_nominal{false};
+  bool enable_dynamic_reseeding{true};
+  float dynamic_reseed_obstacle_cost_threshold{0.0F};
+  float dynamic_reseed_road_border_cost_threshold{0.0F};
+  float evasive_rollout_fraction{0.0625F};
+  bool nominal_seeded_from_last{false};
+  bool warm_start_rejected{false};
   /** Cold-seed u_nom from acados temporal MPT instead of geometric diffusion seed. */
   bool use_temporal_mpt_as_nominal{false};
   /** Prevent acceleration commands and integrated states from producing reverse velocity. */
   bool prevent_reverse_velocity{true};
   /** When false, force N_acc = N_steer = 0 (vehicle delay params ignored). */
   bool enable_input_delay_compensation{true};
+  bool enable_tube_feedback{true};
+  FirstOrderDubinsFeedbackGains tube_feedback_gains{};
+  float steer_delay_residual_gain{1.0F};
   detail::TemporalMptNominalSeeder temporal_mpt_nominal_seeder;
   /** Fill debug.rollouts with top-K weighted samples (CPU replay). Offline retune only by default.
    */
@@ -801,7 +907,11 @@ struct FirstOrderDubinsMppiInterface::Impl
     dyn.min_accel = vehicle_params.min_accel();
     dyn.max_accel = vehicle_params.max_accel();
     dyn.prevent_reverse_velocity = prevent_reverse_velocity;
+    dyn.tube_feedback_enabled = false;
+    dyn.tube_feedback_steps = 0;
+    dyn.tube_feedback_gains = tube_feedback_gains;
     model.setParams(dyn);
+    feedback.setParams(tube_feedback_gains);
     temporal_mpt_nominal_seeder.setBicycleParameters(
       vehicle_params.wheel_base, vehicle_params.ego_axle_to_box_center,
       vehicle_params.acc_time_constant, vehicle_params.steer_time_constant,
@@ -868,6 +978,7 @@ struct FirstOrderDubinsMppiInterface::Impl
     cp.seed_ = 1U;
     controller->setParams(cp);
     controller->setPercentageSampledControlTrajectories(128.0F / static_cast<float>(kNumRollouts));
+    sampler.setEvasiveSampling(evasive_rollout_fraction, dyn.min_accel, dyn.max_steer_angle);
 
     model.GPUSetup();
 
@@ -910,6 +1021,8 @@ struct FirstOrderDubinsMppiInterface::Impl
     steer_delay_buffer.clear();
     delay_buffer_seeded = false;
     temporal_mpt_nominal_seeder.resetWarmStart();
+    nominal_seeded_from_last = false;
+    warm_start_rejected = false;
   }
 
   void syncDelayStepsToModel()
@@ -924,6 +1037,7 @@ struct FirstOrderDubinsMppiInterface::Impl
     dyn.acc_delay_steps = acc_delay_steps;
     dyn.steer_delay_steps = steer_delay_steps;
     model.setParams(dyn);
+    sampler.setEvasiveSampling(evasive_rollout_fraction, dyn.min_accel, dyn.max_steer_angle);
   }
 
   /// @brief Elevate active limits to hard rollout constraints. If no dynamic limit is active,
@@ -943,6 +1057,7 @@ struct FirstOrderDubinsMppiInterface::Impl
         : vehicle_params.max_accel();
 
     model.setParams(dyn);
+    sampler.setEvasiveSampling(evasive_rollout_fraction, dyn.min_accel, dyn.max_steer_angle);
   }
 
   void resizeChannelDelayBuffer(std::vector<float> & buffer, const int n, const float hold)
@@ -1006,6 +1121,30 @@ struct FirstOrderDubinsMppiInterface::Impl
     for (int i = 0; i < steer_delay_steps; ++i) {
       x(static_cast<int>(S::STEER_CMD_D0) + i) = steer_delay_buffer[static_cast<size_t>(i)];
     }
+  }
+
+  void synchronizeSteeringDelayBuffer(const float measured_steering, const float predicted_steering)
+  {
+    if (
+      steer_delay_steps <= 0 || steer_delay_buffer.empty() || steer_delay_residual_gain <= 0.0F ||
+      !std::isfinite(measured_steering) || !std::isfinite(predicted_steering)) {
+      return;
+    }
+
+    const float residual = measured_steering - predicted_steering;
+    const float denominator = static_cast<float>(steer_delay_buffer.size());
+    for (std::size_t index = 0; index < steer_delay_buffer.size(); ++index) {
+      // Correct the command that reaches the plant first most strongly, then taper the residual
+      // to avoid introducing a second discontinuity at the tail of the delay pipe.
+      const float weight = static_cast<float>(steer_delay_buffer.size() - index) / denominator;
+      steer_delay_buffer[index] = std::clamp(
+        steer_delay_buffer[index] + steer_delay_residual_gain * weight * residual,
+        -vehicle_params.max_steer_angle, vehicle_params.max_steer_angle);
+    }
+    RCLCPP_DEBUG(
+      mppiLogger(),
+      "Steering delay synchronization: measured=%.4f predicted=%.4f residual=%.4f taps=%zu",
+      measured_steering, predicted_steering, residual, steer_delay_buffer.size());
   }
 
   void applyPendingControlHistory()
@@ -1147,14 +1286,16 @@ struct FirstOrderDubinsMppiInterface::Impl
   }
 
   void seedNominalControlFromDiffusionReference(
-    const Trajectory & reference, const size_t start_idx)
+    const Trajectory & reference, const size_t start_idx, const detail::InitialState & ego)
   {
     const int accel_idx =
       static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::ACCELERATION_CMD);
     const int steer_idx = static_cast<int>(FirstOrderDubinsBicycleParams::ControlIndex::STEER_CMD);
-    const auto nominal = detail::buildDiffusionNominalControl(
+    const auto geometric_nominal = detail::buildDiffusionNominalControl(
       reference, start_idx, vehicle_params, kMppiHorizon,
       user_cost_params_.nominal_curvature_min_chord_length_m);
+    const auto nominal =
+      detail::filterNominalControlForActuatorDynamics(geometric_nominal, ego, vehicle_params, kDt);
     for (int t = 0; t < kMppiHorizon; ++t) {
       u_nom(accel_idx, t) = nominal[static_cast<size_t>(t)].accel_cmd;
       u_nom(steer_idx, t) = nominal[static_cast<size_t>(t)].steer_cmd;
@@ -1167,7 +1308,7 @@ struct FirstOrderDubinsMppiInterface::Impl
     const auto nominal =
       temporal_mpt_nominal_seeder.solve(reference, ego, vehicle_params, kMppiHorizon);
     if (!nominal) {
-      seedNominalControlFromDiffusionReference(reference, tracking_start_idx);
+      seedNominalControlFromDiffusionReference(reference, tracking_start_idx, ego);
       return;
     }
     const int accel_idx =
@@ -1241,23 +1382,15 @@ struct FirstOrderDubinsMppiInterface::Impl
   void seedNominalControl(
     const Trajectory & reference, const size_t start_idx, const detail::InitialState & ego)
   {
+    nominal_seeded_from_last = false;
     if (forced_nominal_pending) {
       seedNominalControlFromForced();
       forced_nominal_pending = false;
-    } else {
-      // After a tracking reset, step_count is 0 and u_opt was cleared — fall back to DP / MPT
-      // seed. Also reseed when departing from a stop: shifted last u_opt is usually near-zero /
-      // braking.
-      constexpr float kStoppedVelocityMps = 0.05F;
-      const bool started_from_stop = std::abs(ego.velocity) < kStoppedVelocityMps;
-      if (use_last_control_as_nominal && step_count > 0 && !started_from_stop) {
-        seedNominalControlFromLastOptimized();
-      } else if (use_temporal_mpt_as_nominal) {
-        // seedNominalControlFromTemporalMpt(reference, ego);
-      } else {
-        seedNominalControlFromDiffusionReference(reference, start_idx);
-      }
+      filterNominalControl(ego);
+      snapshotNominalForLog();
+      return;
     }
+
     // After a tracking reset, step_count is 0 and u_opt was cleared — fall back to DP / MPT seed.
     // Also reseed when departing from a stop: shifted last u_opt is usually near-zero / braking.
     constexpr float kStoppedVelocityMps = 0.05F;
@@ -1291,10 +1424,11 @@ struct FirstOrderDubinsMppiInterface::Impl
     }
     if (have_last_u) {
       seedNominalControlFromLastOptimized();
+      nominal_seeded_from_last = true;
       snapshotNominalForLog();
       return;
     }
-    seedNominalControlFromDiffusionReference(reference, start_idx);
+    seedNominalControlFromDiffusionReference(reference, start_idx, ego);
     filterNominalControl(ego);
     snapshotNominalForLog();
   }
@@ -1307,6 +1441,11 @@ struct FirstOrderDubinsMppiInterface::Impl
     const std::vector<Segment> & drivable_area_in,
     const FirstOrderDubinsMppiKinematicLimits & kinematic_limits)
   {
+    const bool have_prior_steering_prediction =
+      initialized && step_count > 0 && steering_status.has_value() && !force_cold_start_each_step;
+    const float prior_predicted_steering =
+      initialized ? x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::STEER_ANGLE))
+                  : 0.0F;
     if (!initialized) {
       setup();
     }
@@ -1361,8 +1500,6 @@ struct FirstOrderDubinsMppiInterface::Impl
     const auto initial_state =
       detail::makeInitialState(odometry, acceleration, steering_status, vehicle_params);
     const auto seed_t0 = std::chrono::steady_clock::now();
-    last_seed_nominal_ms =
-      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - seed_t0).count();
     const std::vector<FirstOrderDubinsMppiControl> profile_seed(
       std::max(static_cast<std::size_t>(kMppiHorizon), diffusion_reference.points.size()));
     std::vector<float> profile_reference_velocities(profile_seed.size(), 0.0F);
@@ -1404,6 +1541,8 @@ struct FirstOrderDubinsMppiInterface::Impl
     if (active_velocity_limit_profile.active) {
       snapshotNominalForLog();
     }
+    last_seed_nominal_ms =
+      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - seed_t0).count();
 
     x = model.getZeroState();
     x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::POS_X)) = initial_state.x;
@@ -1415,6 +1554,9 @@ struct FirstOrderDubinsMppiInterface::Impl
     x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::STEER_ANGLE)) =
       initial_state.steering;
     ensureDelayBufferSeeded();
+    if (have_prior_steering_prediction) {
+      synchronizeSteeringDelayBuffer(initial_state.steering, prior_predicted_steering);
+    }
     loadDelayPipesIntoState();
     snapshotDelayBufferForLog();
   }
@@ -1431,6 +1573,86 @@ struct FirstOrderDubinsMppiInterface::Impl
     } else {
       cost.setDrivableAreaSegments(drivable_area);
     }
+  }
+
+  void rejectUnsafeShiftedNominalIfNeeded()
+  {
+    warm_start_rejected = false;
+    if (!enable_dynamic_reseeding || !nominal_seeded_from_last) {
+      return;
+    }
+
+    auto evaluation_params = dyn;
+    evaluation_params.tube_feedback_enabled = false;
+    DYN evaluation_model(evaluation_params);
+    const CostBreakdown shifted_cost =
+      reconstructControlTrajectoryCost(cost, evaluation_model, x, u_nom);
+    const bool obstacle_unsafe = !std::isfinite(shifted_cost.obstacle) ||
+                                 shifted_cost.obstacle > dynamic_reseed_obstacle_cost_threshold;
+    const bool road_border_unsafe =
+      !std::isfinite(shifted_cost.road_border) ||
+      shifted_cost.road_border > dynamic_reseed_road_border_cost_threshold;
+    if (!obstacle_unsafe && !road_border_unsafe) {
+      return;
+    }
+
+    detail::InitialState ego;
+    ego.x = x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::POS_X));
+    ego.y = x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::POS_Y));
+    ego.yaw = x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::YAW));
+    ego.velocity = x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::VEL_X));
+    ego.acceleration = x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::ACCELERATION));
+    ego.steering = x(static_cast<int>(FirstOrderDubinsBicycleParams::StateIndex::STEER_ANGLE));
+    seedNominalControlFromDiffusionReference(diffusion_reference, tracking_start_idx, ego);
+    filterNominalControl(ego);
+    applyActiveVelocityLimitToNominal();
+    snapshotNominalForLog();
+    nominal_seeded_from_last = false;
+    warm_start_rejected = true;
+    RCLCPP_WARN(
+      mppiLogger(),
+      "Rejected shifted MPPI nominal: obstacle_cost=%.3f (limit=%.3f), "
+      "road_border_cost=%.3f (limit=%.3f); cold-seeding from diffusion reference",
+      shifted_cost.obstacle, dynamic_reseed_obstacle_cost_threshold, shifted_cost.road_border,
+      dynamic_reseed_road_border_cost_threshold);
+  }
+
+  void updateTubeFeedbackReference()
+  {
+    dyn.tube_feedback_gains = tube_feedback_gains;
+    dyn.tube_feedback_enabled = enable_tube_feedback;
+    dyn.tube_feedback_steps =
+      enable_tube_feedback
+        ? std::min(kMppiHorizon, FirstOrderDubinsBicycleParams::kMaxTubeFeedbackSteps)
+        : 0;
+    if (!enable_tube_feedback) {
+      model.setParams(dyn);
+      return;
+    }
+
+    auto nominal_params = dyn;
+    nominal_params.tube_feedback_enabled = false;
+    nominal_params.tube_feedback_steps = 0;
+    DYN nominal_model(nominal_params);
+    DYN::state_array nominal_state = x;
+    DYN::state_array next_state = nominal_model.getZeroState();
+    DYN::state_array state_derivative = nominal_model.getZeroState();
+    DYN::output_array output = DYN::output_array::Zero();
+    for (int timestep = 0; timestep < dyn.tube_feedback_steps; ++timestep) {
+      for (int state_index = 0; state_index < FirstOrderDubinsBicycleParams::kTubeFeedbackStateDim;
+           ++state_index) {
+        dyn.tube_feedback_reference
+          [timestep * FirstOrderDubinsBicycleParams::kTubeFeedbackStateDim + state_index] =
+          nominal_state(state_index);
+      }
+      DYN::control_array control = u_nom.col(timestep);
+      nominal_model.enforceConstraints(nominal_state, control);
+      nominal_model.step(
+        nominal_state, next_state, state_derivative, control, output, static_cast<float>(timestep),
+        kDt);
+      nominal_state = next_state;
+    }
+    model.setParams(dyn);
   }
 
   FirstOrderDubinsMppiControl runStep()
@@ -1523,6 +1745,11 @@ struct FirstOrderDubinsMppiInterface::Impl
       obstacle_count > 0 ? obs_half_width.data() : nullptr, obstacle_count, kRefHorizon);
     uploadBoundarySegments();
 
+    // Obstacle/border data is available only now. Reject a hazardous shifted seed before it is
+    // sampled, then form the closed-loop rollout tube around whichever nominal was accepted.
+    rejectUnsafeShiftedNominalIfNeeded();
+    updateTubeFeedbackReference();
+
     controller->updateImportanceSampler(u_nom);
     controller->computeControl(x, 1);
     cudaStreamSynchronize(controller->stream_);
@@ -1552,7 +1779,8 @@ struct FirstOrderDubinsMppiInterface::Impl
     DYN::state_array x_next = model.getZeroState();
     DYN::state_array xdot = model.getZeroState();
     DYN::output_array y = DYN::output_array::Zero();
-    model.step(x, x_next, xdot, u_apply, y, static_cast<float>(step_count), kDt);
+    // Each optimization horizon starts at tube-reference index zero.
+    model.step(x, x_next, xdot, u_apply, y, 0.0F, kDt);
     x = x_next;
 
     ++step_count;
@@ -1655,19 +1883,44 @@ void FirstOrderDubinsMppiInterface::setRuntimeOptions(
   impl_->prevent_reverse_velocity = options.prevent_reverse_velocity;
   setDebugTrajectoryLogging(
     options.enable_debug_trajectory_log, options.debug_trajectory_log_directory);
-  setAblationOptions(
-    options.ignore_obstacles, options.ignore_road_borders, options.ignore_drivable_area,
-    options.force_cold_start_each_step, options.skip_if_invalid,
-    options.use_last_control_as_nominal);
   if (!impl_) {
     throw std::runtime_error("FirstOrderDubinsMppiInterface implementation is missing");
   }
   impl_->use_temporal_mpt_as_nominal = options.use_temporal_mpt_as_nominal;
   impl_->enable_input_delay_compensation = options.enable_input_delay_compensation;
   impl_->min_optimization_length = options.min_optimization_length;
+  const auto finite_nonnegative = [](const float value) {
+    return std::isfinite(value) ? std::max(0.0F, value) : 0.0F;
+  };
+  impl_->enable_dynamic_reseeding = options.enable_dynamic_reseeding;
+  impl_->dynamic_reseed_obstacle_cost_threshold =
+    finite_nonnegative(options.dynamic_reseed_obstacle_cost_threshold);
+  impl_->dynamic_reseed_road_border_cost_threshold =
+    finite_nonnegative(options.dynamic_reseed_road_border_cost_threshold);
+  impl_->evasive_rollout_fraction = std::isfinite(options.evasive_rollout_fraction)
+                                      ? std::clamp(options.evasive_rollout_fraction, 0.0F, 0.10F)
+                                      : 0.0F;
+  impl_->enable_tube_feedback = options.enable_tube_feedback;
+  impl_->tube_feedback_gains.velocity = finite_nonnegative(options.tube_velocity_gain);
+  impl_->tube_feedback_gains.acceleration = finite_nonnegative(options.tube_acceleration_gain);
+  impl_->tube_feedback_gains.lateral_position =
+    finite_nonnegative(options.tube_lateral_position_gain);
+  impl_->tube_feedback_gains.yaw = finite_nonnegative(options.tube_yaw_gain);
+  impl_->tube_feedback_gains.steering = finite_nonnegative(options.tube_steering_gain);
+  impl_->steer_delay_residual_gain = std::isfinite(options.steer_delay_residual_gain)
+                                       ? std::clamp(options.steer_delay_residual_gain, 0.0F, 1.0F)
+                                       : 0.0F;
   impl_->dyn.prevent_reverse_velocity = options.prevent_reverse_velocity;
+  impl_->dyn.tube_feedback_gains = impl_->tube_feedback_gains;
+  impl_->feedback.setParams(impl_->tube_feedback_gains);
+  setAblationOptions(
+    options.ignore_obstacles, options.ignore_road_borders, options.ignore_drivable_area,
+    options.force_cold_start_each_step, options.skip_if_invalid,
+    options.use_last_control_as_nominal);
   if (impl_->initialized) {
     impl_->syncDelayStepsToModel();
+    impl_->sampler.setEvasiveSampling(
+      impl_->evasive_rollout_fraction, impl_->dyn.min_accel, impl_->dyn.max_steer_angle);
     if (!impl_->enable_input_delay_compensation) {
       impl_->accel_delay_buffer.clear();
       impl_->steer_delay_buffer.clear();
@@ -1678,10 +1931,13 @@ void FirstOrderDubinsMppiInterface::setRuntimeOptions(
   RCLCPP_INFO(
     mppiLogger(),
     "MPPI nominal seed: use_temporal_mpt_as_nominal=%s enable_input_delay_compensation=%s "
-    "prevent_reverse_velocity=%s",
+    "prevent_reverse_velocity=%s dynamic_reseeding=%s evasive_rollouts=%.2f%% "
+    "tube_feedback=%s",
     options.use_temporal_mpt_as_nominal ? "true" : "false",
     options.enable_input_delay_compensation ? "true" : "false",
-    options.prevent_reverse_velocity ? "true" : "false");
+    options.prevent_reverse_velocity ? "true" : "false",
+    options.enable_dynamic_reseeding ? "true" : "false", 100.0F * impl_->evasive_rollout_fraction,
+    options.enable_tube_feedback ? "true" : "false");
 }
 void FirstOrderDubinsMppiInterface::setDebugTrajectoryLogging(
   const bool enable, const std::string & directory)
@@ -1722,9 +1978,21 @@ void FirstOrderDubinsMppiInterface::setAblationOptions(
   runtime.skip_if_invalid = skip_if_invalid;
   runtime.min_optimization_length = impl_->min_optimization_length;
   runtime.use_last_control_as_nominal = use_last_control_as_nominal;
+  runtime.enable_dynamic_reseeding = impl_->enable_dynamic_reseeding;
+  runtime.dynamic_reseed_obstacle_cost_threshold = impl_->dynamic_reseed_obstacle_cost_threshold;
+  runtime.dynamic_reseed_road_border_cost_threshold =
+    impl_->dynamic_reseed_road_border_cost_threshold;
+  runtime.evasive_rollout_fraction = impl_->evasive_rollout_fraction;
   runtime.use_temporal_mpt_as_nominal = impl_->use_temporal_mpt_as_nominal;
   runtime.prevent_reverse_velocity = impl_->prevent_reverse_velocity;
   runtime.enable_input_delay_compensation = impl_->enable_input_delay_compensation;
+  runtime.enable_tube_feedback = impl_->enable_tube_feedback;
+  runtime.tube_velocity_gain = impl_->tube_feedback_gains.velocity;
+  runtime.tube_acceleration_gain = impl_->tube_feedback_gains.acceleration;
+  runtime.tube_lateral_position_gain = impl_->tube_feedback_gains.lateral_position;
+  runtime.tube_yaw_gain = impl_->tube_feedback_gains.yaw;
+  runtime.tube_steering_gain = impl_->tube_feedback_gains.steering;
+  runtime.steer_delay_residual_gain = impl_->steer_delay_residual_gain;
   impl_->debug_trajectory_logger.writeRuntimeOptionsOnce(runtime);
 }
 
@@ -2015,6 +2283,7 @@ FirstOrderDubinsMppiOptimizationResult FirstOrderDubinsMppiInterface::optimizeTr
   result.debug.nominal_control_profile.steering_commands_rad = impl_->logged_nominal_steer;
   result.debug.validation = validation;
   result.debug.velocity_limit_profile_active = impl_->active_velocity_limit_profile.active;
+  result.debug.warm_start_was_rejected = impl_->warm_start_rejected;
   result.debug.external_velocity_limit_active =
     impl_->active_velocity_limit_profile.active && impl_->active_kinematic_limits.max_velocity;
   if (impl_->enable_rollout_visualization) {
@@ -2053,9 +2322,21 @@ FirstOrderDubinsMppiOptimizationResult FirstOrderDubinsMppiInterface::optimizeTr
     runtime.skip_if_invalid = impl_->skip_if_invalid;
     runtime.min_optimization_length = impl_->min_optimization_length;
     runtime.use_last_control_as_nominal = impl_->use_last_control_as_nominal;
+    runtime.enable_dynamic_reseeding = impl_->enable_dynamic_reseeding;
+    runtime.dynamic_reseed_obstacle_cost_threshold = impl_->dynamic_reseed_obstacle_cost_threshold;
+    runtime.dynamic_reseed_road_border_cost_threshold =
+      impl_->dynamic_reseed_road_border_cost_threshold;
+    runtime.evasive_rollout_fraction = impl_->evasive_rollout_fraction;
     runtime.use_temporal_mpt_as_nominal = impl_->use_temporal_mpt_as_nominal;
     runtime.prevent_reverse_velocity = impl_->prevent_reverse_velocity;
     runtime.enable_input_delay_compensation = impl_->enable_input_delay_compensation;
+    runtime.enable_tube_feedback = impl_->enable_tube_feedback;
+    runtime.tube_velocity_gain = impl_->tube_feedback_gains.velocity;
+    runtime.tube_acceleration_gain = impl_->tube_feedback_gains.acceleration;
+    runtime.tube_lateral_position_gain = impl_->tube_feedback_gains.lateral_position;
+    runtime.tube_yaw_gain = impl_->tube_feedback_gains.yaw;
+    runtime.tube_steering_gain = impl_->tube_feedback_gains.steering;
+    runtime.steer_delay_residual_gain = impl_->steer_delay_residual_gain;
     impl_->debug_trajectory_logger.writeRuntimeOptionsOnce(runtime);
   }
   impl_->debug_trajectory_logger.logFrame(

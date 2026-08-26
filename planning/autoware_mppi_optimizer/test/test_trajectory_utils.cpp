@@ -562,6 +562,41 @@ TEST(NominalControl, CurvatureChordParameterSmoothsColdStartSteeringSeed)
   EXPECT_LT(windowed_peak, adjacent_peak);
 }
 
+TEST(NominalControl, InverseDynamicsFilterRespectsSteeringLagAndRate)
+{
+  std::vector<FirstOrderDubinsMppiControl> geometric(6U);
+  for (auto & control : geometric) {
+    control.accel_cmd = 1.0F;
+    control.steer_cmd = 0.45F;
+  }
+  InitialState initial;
+  initial.acceleration = 0.0F;
+  initial.steering = 0.0F;
+  FirstOrderDubinsMppiVehicleParams vehicle;
+  vehicle.acc_time_constant = 0.2F;
+  vehicle.steer_time_constant = 0.2F;
+  vehicle.steer_rate_lim = 0.5F;
+  vehicle.max_steer_angle = 0.45F;
+  constexpr float dt = 0.1F;
+
+  const auto filtered = filterNominalControlForActuatorDynamics(geometric, initial, vehicle, dt);
+
+  ASSERT_EQ(filtered.size(), geometric.size());
+  float steering = initial.steering;
+  for (const auto & control : filtered) {
+    EXPECT_GE(control.steer_cmd, -vehicle.max_steer_angle);
+    EXPECT_LE(control.steer_cmd, vehicle.max_steer_angle);
+    const float steering_rate = std::clamp(
+      (control.steer_cmd - steering) / vehicle.steer_time_constant, -vehicle.steer_rate_lim,
+      vehicle.steer_rate_lim);
+    EXPECT_LE(std::abs(steering_rate), vehicle.steer_rate_lim + 1.0E-6F);
+    steering += steering_rate * dt;
+  }
+  EXPECT_NEAR(filtered.front().steer_cmd, 0.1F, 1.0E-6F);
+  EXPECT_GT(steering, 0.0F);
+  EXPECT_LT(steering, geometric.back().steer_cmd);
+}
+
 TEST(NominalControl, ForcedControlPadsClampsAndShiftHoldsTheTerminalCommand)
 {
   FirstOrderDubinsMppiVehicleParams vehicle;

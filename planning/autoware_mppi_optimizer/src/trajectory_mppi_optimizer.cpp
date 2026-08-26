@@ -111,9 +111,22 @@ FirstOrderDubinsMppiRuntimeOptions make_runtime_options(
   output.skip_if_invalid = params.skip_if_invalid;
   output.min_optimization_length = static_cast<float>(params.min_optimization_length);
   output.use_last_control_as_nominal = params.use_last_control_as_nominal;
+  output.enable_dynamic_reseeding = params.enable_dynamic_reseeding;
+  output.dynamic_reseed_obstacle_cost_threshold =
+    static_cast<float>(params.dynamic_reseed_obstacle_cost_threshold);
+  output.dynamic_reseed_road_border_cost_threshold =
+    static_cast<float>(params.dynamic_reseed_road_border_cost_threshold);
+  output.evasive_rollout_fraction = static_cast<float>(params.evasive_rollout_fraction);
   output.use_temporal_mpt_as_nominal = params.use_temporal_mpt_as_nominal;
   output.prevent_reverse_velocity = params.prevent_reverse_velocity;
   output.enable_input_delay_compensation = params.enable_input_delay_compensation;
+  output.enable_tube_feedback = params.enable_tube_feedback;
+  output.tube_velocity_gain = static_cast<float>(params.tube_velocity_gain);
+  output.tube_acceleration_gain = static_cast<float>(params.tube_acceleration_gain);
+  output.tube_lateral_position_gain = static_cast<float>(params.tube_lateral_position_gain);
+  output.tube_yaw_gain = static_cast<float>(params.tube_yaw_gain);
+  output.tube_steering_gain = static_cast<float>(params.tube_steering_gain);
+  output.steer_delay_residual_gain = static_cast<float>(params.steer_delay_residual_gain);
   return output;
 }
 
@@ -541,6 +554,7 @@ void TrajectoryMppiOptimizer::publish_cost_diagnostics(
   cost_diagnostics_->add_key_value("state/track", cost.track);
   cost_diagnostics_->add_key_value("state/heading", cost.heading);
   cost_diagnostics_->add_key_value("state/lateral_distance", cost.lateral_distance);
+  cost_diagnostics_->add_key_value("state/lateral_boundary", cost.lateral_boundary);
   cost_diagnostics_->add_key_value("state/signed_lateral_error_m", cost.signed_lateral_error_m);
   cost_diagnostics_->add_key_value("state/lateral_yaw_error", cost.lateral_yaw_error);
   cost_diagnostics_->add_key_value("state/track_center", cost.track_center);
@@ -556,6 +570,11 @@ void TrajectoryMppiOptimizer::publish_cost_diagnostics(
   cost_diagnostics_->add_key_value("comfort/lateral_jerk", cost.lateral_jerk);
   cost_diagnostics_->add_key_value("comfort/longitudinal_jerk", cost.longitudinal_jerk);
   cost_diagnostics_->add_key_value("comfort/steering_rate", cost.steering_rate);
+  cost_diagnostics_->add_key_value(
+    "kinematic_limit/velocity_overlimit", cost.kinematic_velocity_overlimit);
+  cost_diagnostics_->add_key_value(
+    "kinematic_limit/acceleration_overlimit", cost.kinematic_acceleration_overlimit);
+  cost_diagnostics_->add_key_value("kinematic_limit/jerk_overlimit", cost.kinematic_jerk_overlimit);
   cost_diagnostics_->add_key_value("validation_reason", to_string(debug.validation.reasons));
   cost_diagnostics_->add_key_value(
     "first_invalid_index", debug.validation.first_invalid_index
