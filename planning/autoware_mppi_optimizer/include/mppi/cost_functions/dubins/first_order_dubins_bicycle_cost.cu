@@ -181,11 +181,21 @@ __host__ __device__ inline bool needsLateralPathMetrics(const PARAMS_T & params)
          params.lateral_boundary_barrier_weight > 0.0F;
 }
 
+__host__ __device__ inline float absLateralDistance(const float signed_lateral_distance)
+{
+#ifdef __CUDA_ARCH__
+  return fabsf(signed_lateral_distance);
+#else
+  return std::fabs(signed_lateral_distance);
+#endif
+}
+
 template <class PARAMS_T>
 __host__ __device__ float lateralBoundaryBarrierCost(
-  const PARAMS_T & params, const float lateral_distance)
+  const PARAMS_T & params, const float signed_lateral_distance)
 {
-  const float clearance_to_boundary = params.boundary_threshold - lateral_distance;
+  const float clearance_to_boundary =
+    params.boundary_threshold - absLateralDistance(signed_lateral_distance);
   return computeSmoothBarrierCost(
     clearance_to_boundary, params.lateral_boundary_soft_margin,
     params.lateral_boundary_barrier_weight);
@@ -306,6 +316,18 @@ void FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAM
   HANDLE_ERROR(cudaMemcpyAsync(
     this->cost_d_->ref_yaw_, ref_yaw_, sizeof(ref_yaw_), cudaMemcpyHostToDevice, this->stream_));
   HANDLE_ERROR(cudaMemcpyAsync(
+    this->cost_d_->ref_max_velocity_, ref_max_velocity_, sizeof(ref_max_velocity_),
+    cudaMemcpyHostToDevice, this->stream_));
+  HANDLE_ERROR(cudaMemcpyAsync(
+    this->cost_d_->ref_velocity_limit_active_, ref_velocity_limit_active_,
+    sizeof(ref_velocity_limit_active_), cudaMemcpyHostToDevice, this->stream_));
+  HANDLE_ERROR(cudaMemcpyAsync(
+    &this->cost_d_->has_pointwise_velocity_limits_, &has_pointwise_velocity_limits_,
+    sizeof(has_pointwise_velocity_limits_), cudaMemcpyHostToDevice, this->stream_));
+  HANDLE_ERROR(cudaMemcpyAsync(
+    &this->cost_d_->kinematic_limits_, &kinematic_limits_, sizeof(kinematic_limits_),
+    cudaMemcpyHostToDevice, this->stream_));
+  HANDLE_ERROR(cudaMemcpyAsync(
     &this->cost_d_->num_lateral_corridor_points_, &num_lateral_corridor_points_,
     sizeof(num_lateral_corridor_points_), cudaMemcpyHostToDevice, this->stream_));
   if (num_lateral_corridor_points_ > 0) {
@@ -384,15 +406,27 @@ void FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAM
 
 template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
 void FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>::
+  setKinematicLimits(const FirstOrderDubinsBicycleKinematicLimitData & limits)
+{
+  kinematic_limits_ = limits;
+  dataToDevice();
+}
+
+template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
+void FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>::
   setReferenceTrajectory(
-    const float * x, const float * y, const float * v, const int count, const float * yaw)
+    const float * x, const float * y, const float * v, const int count, const float * yaw,
+    const float * max_velocity, const std::uint8_t * velocity_limit_active)
 {
   const int n = std::max(0, std::min(count, NUM_TIMESTEPS));
+  has_pointwise_velocity_limits_ = max_velocity != nullptr && velocity_limit_active != nullptr;
   const float end_yaw = referenceEndYaw<NUM_TIMESTEPS>(x, y, yaw, n);
   for (int i = 0; i < n; ++i) {
     ref_x_[i] = x[i];
     ref_y_[i] = y[i];
     ref_v_[i] = v[i];
+    ref_max_velocity_[i] = has_pointwise_velocity_limits_ ? max_velocity[i] : 0.0F;
+    ref_velocity_limit_active_[i] = has_pointwise_velocity_limits_ ? velocity_limit_active[i] : 0U;
     if (yaw != nullptr) {
       ref_yaw_[i] = yaw[i];
     } else if (i >= 1) {
@@ -411,6 +445,8 @@ void FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAM
       ref_y_[i] = y[n - 1];
       ref_v_[i] = v[n - 1];
       ref_yaw_[i] = end_yaw;
+      ref_max_velocity_[i] = ref_max_velocity_[n - 1];
+      ref_velocity_limit_active_[i] = ref_velocity_limit_active_[n - 1];
     }
   } else {
     for (int i = 0; i < NUM_TIMESTEPS; ++i) {
@@ -418,6 +454,8 @@ void FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAM
       ref_y_[i] = 0.0F;
       ref_v_[i] = 0.0F;
       ref_yaw_[i] = 0.0F;
+      ref_max_velocity_[i] = 0.0F;
+      ref_velocity_limit_active_[i] = 0U;
     }
   }
   dataToDevice();
@@ -578,7 +616,9 @@ FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>:
 {
   const auto buf = resolvePathBuffers(*this, theta_c);
   const int t = clampTimestep(timestep, NUM_TIMESTEPS);
-  return vectorLength(x - buf.ref_x[t], y - buf.ref_y[t]);
+  const float dx = x - buf.ref_x[t];
+  const float dy = y - buf.ref_y[t];
+  return dx * dx + dy * dy;
 }
 
 template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
@@ -680,7 +720,8 @@ __host__ __device__ bool FirstOrderDubinsBicycleCostImpl<
   CLASS_T, NUM_TIMESTEPS, PARAMS_T,
   DYN_PARAMS_T>::exceedsLateralBoundary(const float x, const float y, float * theta_c) const
 {
-  return computeLateralDistanceValue(x, y, theta_c) >= this->params_.boundary_threshold;
+  return absLateralDistance(computeLateralDistanceValue(x, y, theta_c)) >=
+         this->params_.boundary_threshold;
 }
 
 template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
@@ -794,7 +835,9 @@ FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>:
   const float x_center = x + this->params_.ego_axle_to_box_center * std::cos(yaw);
   const float y_center = y + this->params_.ego_axle_to_box_center * std::sin(yaw);
 #endif
-  return vectorLength(x_center - buf.ref_x[t], y_center - buf.ref_y[t]);
+  const float dx = x_center - buf.ref_x[t];
+  const float dy = y_center - buf.ref_y[t];
+  return dx * dx + dy * dy;
 }
 
 template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
@@ -958,12 +1001,14 @@ FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>:
   result.heading = this->params_.heading_coeff * computeHeadingValue(yaw, timestep);
   if (needsLateralPathMetrics(this->params_)) {
     const LateralPathMetrics lateral = computeLateralPathMetrics(x_pos, y_pos, yaw);
-    result.lateral_distance = this->params_.lateral_distance_coeff * lateral.lateral_distance;
+    result.lateral_distance =
+      this->params_.lateral_distance_coeff * lateral.lateral_distance * lateral.lateral_distance;
     result.lateral_boundary = lateralBoundaryBarrierCost(this->params_, lateral.lateral_distance);
     result.lateral_yaw_error = this->params_.lateral_yaw_error_coeff * lateral.lateral_yaw_error_sq;
-    result.remaining_distance =
-      this->params_.remaining_distance_coeff * lateral.remaining_distance_s;
-    result.path_overshoot = this->params_.path_overshoot_coeff * lateral.overshoot_distance_s;
+    result.remaining_distance = this->params_.remaining_distance_coeff *
+                                lateral.remaining_distance_s * lateral.remaining_distance_s;
+    result.path_overshoot = this->params_.path_overshoot_coeff * lateral.overshoot_distance_s *
+                            lateral.overshoot_distance_s;
   }
   result.track_center =
     this->params_.track_center_coeff * computeTrackCenterValue(x_pos, y_pos, yaw, timestep);
@@ -988,6 +1033,12 @@ FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>:
   result.longitudinal_jerk =
     this->params_.longitudinal_jerk_coeff * longitudinal_jerk * longitudinal_jerk;
   result.steering_rate = this->params_.steer_rate_coeff * steer_rate * steer_rate;
+  const auto kinematic_cost = computeKinematicLimitCost(
+    y[static_cast<int>(O::BASELINK_VEL_B_X)], y[static_cast<int>(O::ACCELERATION)],
+    longitudinal_jerk, timestep);
+  result.kinematic_velocity_overlimit = kinematic_cost.velocity;
+  result.kinematic_acceleration_overlimit = kinematic_cost.acceleration;
+  result.kinematic_jerk_overlimit = kinematic_cost.jerk;
 
   result.running_total = result.componentTotal();
   result.total = result.running_total;
@@ -1012,14 +1063,15 @@ autoware::mppi_optimizer::FirstOrderDubinsMppiCostBreakdown FirstOrderDubinsBicy
   if (needsLateralPathMetrics(this->params_)) {
     const LateralPathMetrics lateral = computeLateralPathMetrics(x_pos, y_pos, yaw);
     result.lateral_distance = this->params_.lateral_distance_coeff * lateral.lateral_distance *
-                              this->params_.track_terminal_scale;
+                              lateral.lateral_distance * this->params_.track_terminal_scale;
     result.lateral_boundary = lateralBoundaryBarrierCost(this->params_, lateral.lateral_distance);
     result.lateral_yaw_error = this->params_.lateral_yaw_error_coeff *
                                lateral.lateral_yaw_error_sq * this->params_.track_terminal_scale;
     result.remaining_distance = this->params_.remaining_distance_coeff *
-                                lateral.remaining_distance_s * this->params_.track_terminal_scale;
+                                lateral.remaining_distance_s * lateral.remaining_distance_s *
+                                this->params_.track_terminal_scale;
     result.path_overshoot = this->params_.path_overshoot_coeff * lateral.overshoot_distance_s *
-                            this->params_.track_terminal_scale;
+                            lateral.overshoot_distance_s * this->params_.track_terminal_scale;
   }
   result.track_center = this->params_.track_center_coeff *
                         computeTrackCenterValue(x_pos, y_pos, yaw, timestep) *
@@ -1057,11 +1109,14 @@ FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>:
   float path_overshoot_cost = 0.0F;
   if (needsLateralPathMetrics(this->params_)) {
     const LateralPathMetrics lateral = computeLateralPathMetrics(x_pos, y_pos, yaw, theta_c);
-    lateral_distance_cost = this->params_.lateral_distance_coeff * lateral.lateral_distance;
+    lateral_distance_cost =
+      this->params_.lateral_distance_coeff * lateral.lateral_distance * lateral.lateral_distance;
     lateral_boundary_cost = lateralBoundaryBarrierCost(this->params_, lateral.lateral_distance);
     lateral_yaw_error_cost = this->params_.lateral_yaw_error_coeff * lateral.lateral_yaw_error_sq;
-    remaining_distance_cost = this->params_.remaining_distance_coeff * lateral.remaining_distance_s;
-    path_overshoot_cost = this->params_.path_overshoot_coeff * lateral.overshoot_distance_s;
+    remaining_distance_cost = this->params_.remaining_distance_coeff *
+                              lateral.remaining_distance_s * lateral.remaining_distance_s;
+    path_overshoot_cost = this->params_.path_overshoot_coeff * lateral.overshoot_distance_s *
+                          lateral.overshoot_distance_s;
   }
   const float track_center_cost = this->params_.track_center_coeff *
                                   computeTrackCenterValue(x_pos, y_pos, yaw, timestep, theta_c);
@@ -1102,11 +1157,14 @@ float FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARA
   float path_overshoot_cost = 0.0F;
   if (needsLateralPathMetrics(this->params_)) {
     const LateralPathMetrics lateral = computeLateralPathMetrics(x_pos, y_pos, yaw);
-    lateral_distance_cost = this->params_.lateral_distance_coeff * lateral.lateral_distance;
+    lateral_distance_cost =
+      this->params_.lateral_distance_coeff * lateral.lateral_distance * lateral.lateral_distance;
     lateral_boundary_cost = lateralBoundaryBarrierCost(this->params_, lateral.lateral_distance);
     lateral_yaw_error_cost = this->params_.lateral_yaw_error_coeff * lateral.lateral_yaw_error_sq;
-    remaining_distance_cost = this->params_.remaining_distance_coeff * lateral.remaining_distance_s;
-    path_overshoot_cost = this->params_.path_overshoot_coeff * lateral.overshoot_distance_s;
+    remaining_distance_cost = this->params_.remaining_distance_coeff *
+                              lateral.remaining_distance_s * lateral.remaining_distance_s;
+    path_overshoot_cost = this->params_.path_overshoot_coeff * lateral.overshoot_distance_s *
+                          lateral.overshoot_distance_s;
   }
   const float track_center_cost =
     this->params_.track_center_coeff * computeTrackCenterValue(x_pos, y_pos, yaw, timestep);
@@ -1173,14 +1231,15 @@ FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>:
     if (needsLateralPathMetrics(this->params_)) {
       const LateralPathMetrics lateral = computeLateralPathMetrics(x_pos, y_pos, yaw, theta_c);
       lateral_distance_cost = this->params_.lateral_distance_coeff * lateral.lateral_distance *
-                              this->params_.track_terminal_scale;
+                              lateral.lateral_distance * this->params_.track_terminal_scale;
       lateral_boundary_cost = lateralBoundaryBarrierCost(this->params_, lateral.lateral_distance);
-      lateral_yaw_error_cost = this->params_.lateral_yaw_error_coeff * lateral.lateral_yaw_error_sq *
-                               this->params_.track_terminal_scale;
+      lateral_yaw_error_cost = this->params_.lateral_yaw_error_coeff *
+                               lateral.lateral_yaw_error_sq * this->params_.track_terminal_scale;
       remaining_distance_cost = this->params_.remaining_distance_coeff *
-                                lateral.remaining_distance_s * this->params_.track_terminal_scale;
+                                lateral.remaining_distance_s * lateral.remaining_distance_s *
+                                this->params_.track_terminal_scale;
       path_overshoot_cost = this->params_.path_overshoot_coeff * lateral.overshoot_distance_s *
-                            this->params_.track_terminal_scale;
+                            lateral.overshoot_distance_s * this->params_.track_terminal_scale;
     }
     const float track_center_cost = this->params_.track_center_coeff *
                                     computeTrackCenterValue(x_pos, y_pos, yaw, timestep, theta_c) *
@@ -1200,22 +1259,44 @@ FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>:
 }
 
 template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
+__host__ __device__ FirstOrderDubinsBicycleKinematicCost
+FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>::
+  computeKinematicLimitCost(
+    const float velocity, const float longitudinal_acceleration, const float longitudinal_jerk,
+    const int timestep) const
+{
+  auto limits = kinematic_limits_;
+  const int bounded_timestep =
+    timestep < 0 ? 0 : (timestep >= NUM_TIMESTEPS ? NUM_TIMESTEPS - 1 : timestep);
+  if (has_pointwise_velocity_limits_ && ref_velocity_limit_active_[bounded_timestep] != 0U) {
+    limits.active_mask |= kVelocityLimitActive;
+    limits.min_velocity = 0.0F;
+    limits.max_velocity = ref_max_velocity_[bounded_timestep];
+  }
+  return computeCappedKinematicIntervalCost(
+    limits, this->params_.overlimit_coeff, this->params_.crash_contact_penalty, velocity,
+    longitudinal_acceleration, longitudinal_jerk);
+}
+
+template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
 float FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>::
   computeComfortCost(
     const Eigen::Ref<const control_array> & u, const Eigen::Ref<const output_array> & y,
     int timestep)
 {
-  (void)timestep;
   float lateral_accel = 0.0F;
   float lateral_jerk = 0.0F;
   float longitudinal_jerk = 0.0F;
   float steer_rate = 0.0F;
   comfortTerms(
     this->params_, u.data(), y.data(), lateral_accel, lateral_jerk, longitudinal_jerk, steer_rate);
+  const auto kinematic_cost = computeKinematicLimitCost(
+    y(static_cast<int>(O::BASELINK_VEL_B_X)), y(static_cast<int>(O::ACCELERATION)),
+    longitudinal_jerk, timestep);
   return this->params_.lateral_acceleration_coeff * lateral_accel * lateral_accel +
          this->params_.lateral_jerk_coeff * lateral_jerk * lateral_jerk +
          this->params_.longitudinal_jerk_coeff * longitudinal_jerk * longitudinal_jerk +
-         this->params_.steer_rate_coeff * steer_rate * steer_rate;
+         this->params_.steer_rate_coeff * steer_rate * steer_rate + kinematic_cost.total;
 }
 
 template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>
@@ -1223,16 +1304,18 @@ __device__ float
 FirstOrderDubinsBicycleCostImpl<CLASS_T, NUM_TIMESTEPS, PARAMS_T, DYN_PARAMS_T>::computeComfortCost(
   float * u, float * y, int timestep)
 {
-  (void)timestep;
   float lateral_accel = 0.0F;
   float lateral_jerk = 0.0F;
   float longitudinal_jerk = 0.0F;
   float steer_rate = 0.0F;
   comfortTerms(this->params_, u, y, lateral_accel, lateral_jerk, longitudinal_jerk, steer_rate);
+  const auto kinematic_cost = computeKinematicLimitCost(
+    y[static_cast<int>(O::BASELINK_VEL_B_X)], y[static_cast<int>(O::ACCELERATION)],
+    longitudinal_jerk, timestep);
   return this->params_.lateral_acceleration_coeff * lateral_accel * lateral_accel +
          this->params_.lateral_jerk_coeff * lateral_jerk * lateral_jerk +
          this->params_.longitudinal_jerk_coeff * longitudinal_jerk * longitudinal_jerk +
-         this->params_.steer_rate_coeff * steer_rate * steer_rate;
+         this->params_.steer_rate_coeff * steer_rate * steer_rate + kinematic_cost.total;
 }
 
 template <class CLASS_T, int NUM_TIMESTEPS, class PARAMS_T, class DYN_PARAMS_T>

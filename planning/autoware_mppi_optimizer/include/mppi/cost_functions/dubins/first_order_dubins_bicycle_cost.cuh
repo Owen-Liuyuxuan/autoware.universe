@@ -9,7 +9,10 @@
 #include "autoware/mppi_optimizer/first_order_dubins_mppi_interface.hpp"
 
 #include <mppi/cost_functions/cost.cuh>
+#include <mppi/cost_functions/dubins/first_order_dubins_bicycle_kinematic_limits.cuh>
 #include <mppi/dynamics/dubins/first_order_dubins_bicycle.cuh>
+
+#include <cstdint>
 
 __host__ __device__ inline float computeSmoothBarrierCost(
   const float distance, const float safe_margin, const float precomputed_weight)
@@ -24,20 +27,21 @@ template <int NUM_TIMESTEPS>
 struct FirstOrderDubinsBicycleCostParams : public CostParams<2>
 {
   float speed_coeff = 500.0F;
+  /** Pull toward ref position at each step: coeff * ||p - ref[t]||^2; 0 disables. */
   float track_coeff = 1000.0F;
   /** Multiplier on track_coeff * track_val in terminalCost (running state cost uses scale 1). */
   float track_terminal_scale = 10.0F;
   /** Pull toward ref heading at each horizon step: coeff * (yaw - ref_yaw[t])^2; 0 disables. */
   float heading_coeff = 500.0F;
-  /** Spatial (closest-segment) distance to the reference polyline; 0 disables. */
+  /** Spatial (closest-segment) cross-track error: coeff * e_lat^2; 0 disables. */
   float lateral_distance_coeff = 0.0F;
   /** Spatial yaw error vs closest-segment tangent: coeff * Δψ^2; 0 disables. */
   float lateral_yaw_error_coeff = 0.0F;
-  /** Progress along corridor: coeff * remaining chord length to path end [m]; 0 disables. */
+  /** Progress along corridor: coeff * (remaining chord length [m])^2; 0 disables. */
   float remaining_distance_coeff = 0.0F;
-  /** Along-track distance past the corridor tip [m]; 0 disables. */
+  /** Along-track distance past the corridor tip: coeff * (overshoot [m])^2; 0 disables. */
   float path_overshoot_coeff = 0.0F;
-  /** Track the ego footprint center, rather than its rear-axle state, against ref[t]. */
+  /** Track ego footprint center vs ref[t]: coeff * ||center - ref[t]||^2; 0 disables. */
   float track_center_coeff = 0.0F;
   /** Quadratic soft cost for ego corners closer than corner_safe_margin to a boundary. */
   float corner_buffer_coeff = 0.0F;
@@ -53,6 +57,8 @@ struct FirstOrderDubinsBicycleCostParams : public CostParams<2>
   float steer_cmd_coeff = 0.0F;
   /** Direct cost on steer rate [rad/s]: (steer_cmd - steer) / steer_time_constant. */
   float steer_rate_coeff = 0.0F;
+  /** Shared cost weight for optional velocity, acceleration, and jerk interval violations. */
+  float overlimit_coeff = 10000.0F;
   float lateral_acceleration_coeff = 300.0F;
   float lateral_jerk_coeff = 300.0F;
   float longitudinal_jerk_coeff = 10.0F;
@@ -131,7 +137,10 @@ public:
   void paramsToDevice();
 
   void setReferenceTrajectory(
-    const float * x, const float * y, const float * v, int count, const float * yaw = nullptr);
+    const float * x, const float * y, const float * v, int count, const float * yaw = nullptr,
+    const float * max_velocity = nullptr, const std::uint8_t * velocity_limit_active = nullptr);
+
+  void setKinematicLimits(const FirstOrderDubinsBicycleKinematicLimitData & limits);
 
   /**
    * Spatial corridor for lateral_distance / lateral crash / lateral yaw error.
@@ -171,7 +180,7 @@ public:
 
   void clearDrivableArea();
 
-  /** Euclidean position error to the time-aligned reference sample ref[t]. */
+  /** Euclidean position error squared: ||p - ref[t]||^2. */
   __host__ __device__ float computeTrackValue(
     float x, float y, int timestep, const float * theta_c = nullptr) const;
 
@@ -179,10 +188,8 @@ public:
     float yaw, int timestep, const float * theta_c = nullptr) const;
 
   /**
-   * Cross-track distance to the lateral corridor (or ref_ polyline). Projections past the
-   * polyline ends use perpendicular distance to the extended tip segment so horizon
-   * overshoot is not treated as lateral departure. Used by lateral_distance_coeff and
-   * exceedsLateralBoundary.
+   * Cross-track distance to the lateral corridor (or ref_ polyline). Returns signed
+   * lateral offset (+ = left of segment tangent); use fabs for magnitude-based checks.
    */
   __host__ __device__ float computeLateralDistanceValue(
     float x, float y, float * theta_c = nullptr) const;
@@ -195,6 +202,7 @@ public:
    */
   struct LateralPathMetrics
   {
+    /** Signed cross-track error [m]; + = left of closest-segment tangent. */
     float lateral_distance = 0.0F;
     float lateral_yaw_error_sq = 0.0F;
     float path_length_s = 0.0F;
@@ -208,7 +216,7 @@ public:
   __host__ __device__ LateralPathMetrics
   computeLateralPathMetrics(float x, float y, float yaw, float * theta_c = nullptr) const;
 
-  /** Distance from the ego footprint center to the time-aligned reference sample. */
+  /** Squared distance from the ego footprint center to the time-aligned reference sample. */
   __host__ __device__ float computeTrackCenterValue(
     float x, float y, float yaw, int timestep, const float * theta_c = nullptr) const;
 
@@ -264,6 +272,9 @@ public:
 
   __device__ float computeComfortCost(float * u, float * y, int timestep);
 
+  __host__ __device__ FirstOrderDubinsBicycleKinematicCost computeKinematicLimitCost(
+    float velocity, float longitudinal_acceleration, float longitudinal_jerk, int timestep) const;
+
   __device__ float terminalCost(float * y, float * theta_c);
 
   float computeRunningCost(
@@ -277,6 +288,10 @@ public:
   float ref_y_[NUM_TIMESTEPS] = {};
   float ref_v_[NUM_TIMESTEPS] = {};
   float ref_yaw_[NUM_TIMESTEPS] = {};
+  float ref_max_velocity_[NUM_TIMESTEPS] = {};
+  std::uint8_t ref_velocity_limit_active_[NUM_TIMESTEPS] = {};
+  bool has_pointwise_velocity_limits_{false};
+  FirstOrderDubinsBicycleKinematicLimitData kinematic_limits_{};
   int num_lateral_corridor_points_ = 0;
   float lateral_corridor_x_[kMaxLateralCorridorPoints] = {};
   float lateral_corridor_y_[kMaxLateralCorridorPoints] = {};
