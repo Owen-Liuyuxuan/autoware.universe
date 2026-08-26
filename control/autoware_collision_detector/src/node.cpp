@@ -331,6 +331,8 @@ void CollisionDetectorNode::checkCollision(diagnostic_updater::DiagnosticStatusW
     is_error_diag_ = true;
     status.level = diagnostic_msgs::msg::DiagnosticStatus::ERROR;
     status.message = "collision detected";
+    RCLCPP_ERROR_THROTTLE(
+        this->get_logger(), *clock_, 1000 /* ms */, "Collision is detected by collision_detector");
     if (nearest_obstacle) {
       stat.addf("Distance to nearest neighbor object", "%lf", nearest_obstacle->first);
     } else {
