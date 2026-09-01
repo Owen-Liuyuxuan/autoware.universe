@@ -42,6 +42,15 @@ struct HysteresisResult
 };
 
 /**
+ * @brief Get the lateral threshold to evaluate the next cycle under.
+ * @param[in] state current hysteresis state
+ * @param[in] param parameters
+ * @return release margin while a critical verdict is held, otherwise the trigger threshold [m]
+ */
+double calc_effective_lateral_margin(
+  const HysteresisState & state, const UncrossableBoundaryDepartureParam & param);
+
+/**
  * @brief Pure function to determine departure status using hysteresis.
  * @param[in] state current hysteresis state
  * @param[in] evaluation_result result from stateless evaluator
@@ -51,7 +60,7 @@ struct HysteresisResult
  */
 HysteresisResult update_and_judge(
   const HysteresisState & state,
-  const std::optional<Side<std::optional<CriticalPointPair>>> & evaluation_result,
+  const std::optional<Side<std::optional<DeparturePointPair>>> & evaluation_result,
   const UncrossableBoundaryDepartureParam & param, const double current_time_s);
 
 }  // namespace autoware::boundary_departure_checker
