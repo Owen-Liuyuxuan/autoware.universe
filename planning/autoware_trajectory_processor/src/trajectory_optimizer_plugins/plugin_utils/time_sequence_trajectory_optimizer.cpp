@@ -38,6 +38,23 @@ double yaw_from_quaternion(const geometry_msgs::msg::Quaternion & q)
 {
   return std::atan2(2.0 * (q.w * q.z + q.x * q.y), 1.0 - 2.0 * (q.y * q.y + q.z * q.z));
 }
+
+/// Mean chord speed of the first three time-indexed points: (|p1-p0| + |p2-p1|) / (2 dt).
+double average_speed_from_first_three_points(const Trajectory & trajectory)
+{
+  constexpr size_t n_points = 3;
+  if (trajectory.points.size() < 2) {
+    return 0.0;
+  }
+  const size_t last = std::min(n_points, trajectory.points.size()) - 1;
+  double path_length_m = 0.0;
+  for (size_t i = 0; i < last; ++i) {
+    const auto & a = trajectory.points[i].pose.position;
+    const auto & b = trajectory.points[i + 1].pose.position;
+    path_length_m += std::hypot(b.x - a.x, b.y - a.y);
+  }
+  return path_length_m / (opt_dt_s * static_cast<double>(last));
+}
 }  // namespace
 
 TrajectoryOptimizer::TrajectoryOptimizer(
@@ -68,7 +85,7 @@ OptimizationResult TrajectoryOptimizer::optimize(
   const double base_y = ego_pose.position.y;
   const double yaw0 = yaw_from_quaternion(ego_pose.orientation);
   const double v0 = std::clamp(
-    static_cast<double>(ego_odometry.twist.twist.linear.x), params_.min_velocity_mps,
+    average_speed_from_first_three_points(raw_trajectory), params_.min_velocity_mps,
     params_.max_velocity_mps);
 
   double delta0 = 0.0;

@@ -112,6 +112,7 @@ TEST_F(TimeSequenceTrajectoryOptimizerTest, IgnoresIncomingTrajectorySpeed)
     EXPECT_LT(std::abs(point.longitudinal_velocity_mps), 20.0F);
     EXPECT_GT(point.longitudinal_velocity_mps, 1.0F);
   }
+  // Initial v is chord-speed of the first three poses (~8 m/s), not the fake 99 m/s field.
   EXPECT_NEAR(result.trajectory.points.front().longitudinal_velocity_mps, 8.0F, 2.0F);
 }
 

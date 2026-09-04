@@ -42,7 +42,8 @@ struct OptimizationResult
 };
 
 /// Tracks a pose-only time-indexed trajectory with a kinematic bicycle OCP.
-/// Initial state is ego odometry + measured steering; incoming trajectory speed is ignored.
+/// Initial pose/steering come from ego odometry + measured steering; initial speed is the
+/// average chord speed of the first three trajectory points (not ego twist).
 class TrajectoryOptimizer
 {
 public:
