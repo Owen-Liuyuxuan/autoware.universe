@@ -47,13 +47,15 @@ time_sequence_raw::TrajectoryOptimizationParams to_opt_params(
   out.weight_longitudinal = p.weight_longitudinal;
   out.weight_lateral = p.weight_lateral;
   out.weight_yaw = p.weight_yaw;
-  out.weight_acceleration = p.weight_acceleration;
+  out.weight_jerk = p.weight_jerk;
   out.weight_steering_rate = p.weight_steering_rate;
   out.terminal_weight_scale = p.terminal_weight_scale;
   out.min_velocity_mps = p.min_velocity_mps;
   out.max_velocity_mps = p.max_velocity_mps;
   out.min_acceleration_mps2 = p.min_acceleration_mps2;
   out.max_acceleration_mps2 = p.max_acceleration_mps2;
+  out.min_jerk_mps3 = p.min_jerk_mps3;
+  out.max_jerk_mps3 = p.max_jerk_mps3;
   out.max_steering_rate_rps = p.max_steering_rate_rps;
   out.max_lateral_acceleration_mps2 = p.max_lateral_acceleration_mps2;
   out.max_sqp_iterations = static_cast<int>(p.max_sqp_iterations);
@@ -289,7 +291,7 @@ ProcessingResult TrajectoryTimeSequenceRawOptimizer::process(
   TrajectoryPoints & traj_points, TrajectoryProcessorData & data)
 {
   autoware_utils_debug::ScopedTimeTrack st(__func__, *get_time_keeper());
-  if (!enabled_ || !data.current_odometry) {
+  if (!enabled_ || !data.current_odometry || !data.current_acceleration) {
     return ProcessingResult::Unchanged;
   }
 
@@ -345,8 +347,9 @@ ProcessingResult TrajectoryTimeSequenceRawOptimizer::process(
     steering = data.current_steering->steering_tire_angle;
   }
 
-  const auto result =
-    optimizer_->optimize(reference, *data.current_odometry, steering, data.candidate_index);
+  const auto result = optimizer_->optimize(
+    reference, *data.current_odometry, steering, data.current_acceleration->accel.accel.linear.x,
+    data.candidate_index);
   last_solver_status_ = result.solver_status;
   last_solve_time_ms_ = result.solve_time_ms;
 

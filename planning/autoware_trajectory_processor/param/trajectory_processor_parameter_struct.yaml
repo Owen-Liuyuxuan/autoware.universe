@@ -828,10 +828,10 @@ trajectory_processor_params:
       validation:
         gt_eq<>: [0.0]
       read_only: false
-    weight_acceleration:
+    weight_jerk:
       type: double
       default_value: 0.1
-      description: Regularization weight on acceleration input
+      description: Regularization weight on jerk input
       validation:
         gt_eq<>: [0.0]
       read_only: false
@@ -864,12 +864,22 @@ trajectory_processor_params:
     min_acceleration_mps2:
       type: double
       default_value: -4.0
-      description: Minimum longitudinal acceleration [m/s^2]
+      description: Minimum longitudinal acceleration state bound [m/s^2]
       read_only: false
     max_acceleration_mps2:
       type: double
       default_value: 3.0
-      description: Maximum longitudinal acceleration [m/s^2]
+      description: Maximum longitudinal acceleration state bound [m/s^2]
+      read_only: false
+    min_jerk_mps3:
+      type: double
+      default_value: -5.0
+      description: Minimum longitudinal jerk input bound [m/s^3]
+      read_only: false
+    max_jerk_mps3:
+      type: double
+      default_value: 5.0
+      description: Maximum longitudinal jerk input bound [m/s^3]
       read_only: false
     max_steering_rate_rps:
       type: double

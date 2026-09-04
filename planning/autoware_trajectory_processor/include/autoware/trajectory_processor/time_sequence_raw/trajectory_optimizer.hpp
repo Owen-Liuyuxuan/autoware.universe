@@ -43,7 +43,8 @@ struct OptimizationResult
 
 /// Tracks a pose-only time-indexed trajectory with a kinematic bicycle OCP.
 /// Initial pose/steering come from ego odometry + measured steering; initial speed is the
-/// average chord speed of the first three trajectory points (not ego twist).
+/// average chord speed of the first three trajectory points (not ego twist). Initial
+/// acceleration comes from measured ego longitudinal acceleration.
 class TrajectoryOptimizer
 {
 public:
@@ -53,7 +54,8 @@ public:
 
   OptimizationResult optimize(
     const Trajectory & raw_trajectory, const Odometry & ego_odometry,
-    const std::optional<double> & current_steering_angle_rad, size_t batch_index);
+    const std::optional<double> & current_steering_angle_rad,
+    double current_longitudinal_accel_mps2, size_t batch_index);
 
   void clear_warm_start(size_t batch_index);
 

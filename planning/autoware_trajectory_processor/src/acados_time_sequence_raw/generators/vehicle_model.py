@@ -12,10 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Kinematic bicycle model with steering-angle state for time-sequence raw optimization.
+"""Kinematic bicycle model with steering-angle and acceleration states for time-sequence raw optimization.
 
-States  (nx=5): x [m], y [m], psi [rad], v [m/s], delta [rad]
-Inputs  (nu=2): a [m/s^2] (longitudinal acceleration), delta_rate [rad/s] (steering angle rate)
+States  (nx=6): x [m], y [m], psi [rad], v [m/s], delta [rad], a [m/s^2]
+Inputs  (nu=2): jerk [m/s^3], delta_rate [rad/s] (steering angle rate)
 Params  (np=1): wheelbase [m]
 
 Dynamics:
@@ -24,6 +24,7 @@ Dynamics:
     psi_dot   = v * tan(delta) / wheelbase
     v_dot     = a
     delta_dot = delta_rate
+    a_dot     = jerk
 
 Nonlinear constraint expression (soft-bounded in the OCP):
     a_lat = v^2 * tan(delta) / wheelbase
@@ -41,14 +42,16 @@ MODEL_NAME = "kinematic_bicycle_time_seq"
 
 # Default input bounds baked into the generated solver.
 # The C++ wrapper overrides them at runtime from ROS parameters.
-DEFAULT_A_MIN_MPS2 = -4.0
-DEFAULT_A_MAX_MPS2 = 3.0
+DEFAULT_JERK_MIN_MPS3 = -5.0
+DEFAULT_JERK_MAX_MPS3 = 5.0
 DEFAULT_DELTA_RATE_MAX_RPS = 1.0
 
 # Default state bounds (stages 1..N). Overridden at runtime as well.
 DEFAULT_V_MIN_MPS = 0.0
 DEFAULT_V_MAX_MPS = 30.0
 DEFAULT_DELTA_MAX_RAD = 0.7
+DEFAULT_A_MIN_MPS2 = -4.0
+DEFAULT_A_MAX_MPS2 = 3.0
 
 
 def kinematic_bicycle_model():
@@ -58,11 +61,12 @@ def kinematic_bicycle_model():
     psi = SX.sym("psi")
     v = SX.sym("v")
     delta = SX.sym("delta")
-    states = vertcat(x, y, psi, v, delta)
-
     a = SX.sym("a")
+    states = vertcat(x, y, psi, v, delta, a)
+
+    jerk = SX.sym("jerk")
     delta_rate = SX.sym("delta_rate")
-    inputs = vertcat(a, delta_rate)
+    inputs = vertcat(jerk, delta_rate)
 
     wheelbase = SX.sym("wheelbase")
     params = vertcat(wheelbase)
@@ -73,6 +77,7 @@ def kinematic_bicycle_model():
         v * tan(delta) / wheelbase,
         a,
         delta_rate,
+        jerk,
     )
 
     xdot = vertcat(
@@ -81,6 +86,7 @@ def kinematic_bicycle_model():
         SX.sym("psi_dot"),
         SX.sym("v_dot"),
         SX.sym("delta_dot"),
+        SX.sym("a_dot"),
     )
 
     model = SimpleNamespace()
@@ -94,11 +100,13 @@ def kinematic_bicycle_model():
 
     model.con_h_expr = v * v * tan(delta) / wheelbase
 
-    model.a_min = DEFAULT_A_MIN_MPS2
-    model.a_max = DEFAULT_A_MAX_MPS2
+    model.jerk_min = DEFAULT_JERK_MIN_MPS3
+    model.jerk_max = DEFAULT_JERK_MAX_MPS3
     model.delta_rate_max = DEFAULT_DELTA_RATE_MAX_RPS
     model.v_min = DEFAULT_V_MIN_MPS
     model.v_max = DEFAULT_V_MAX_MPS
     model.delta_max = DEFAULT_DELTA_MAX_RAD
+    model.a_min = DEFAULT_A_MIN_MPS2
+    model.a_max = DEFAULT_A_MAX_MPS2
 
     return model

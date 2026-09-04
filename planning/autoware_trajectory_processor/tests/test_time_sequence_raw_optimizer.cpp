@@ -75,7 +75,7 @@ TEST_F(TimeSequenceTrajectoryOptimizerTest, OptimizesNoisyTrajectory)
   TrajectoryOptimizer optimizer(params, vehicle_info_, 1);
 
   const auto raw = make_noisy_trajectory(8.0, 0.15);
-  const auto result = optimizer.optimize(raw, odometry_, 0.0, 0);
+  const auto result = optimizer.optimize(raw, odometry_, 0.0, 0.0, 0);
 
   ASSERT_TRUE(result.optimized) << "acados status: " << result.solver_status;
   ASSERT_EQ(result.trajectory.points.size(), opt_horizon);
@@ -105,7 +105,7 @@ TEST_F(TimeSequenceTrajectoryOptimizerTest, IgnoresIncomingTrajectorySpeed)
   TrajectoryOptimizer optimizer(params, vehicle_info_, 1);
 
   const auto raw = make_noisy_trajectory(8.0, 0.05, 99.0F);
-  const auto result = optimizer.optimize(raw, odometry_, 0.0, 0);
+  const auto result = optimizer.optimize(raw, odometry_, 0.0, 0.0, 0);
   ASSERT_TRUE(result.optimized) << "acados status: " << result.solver_status;
 
   for (const auto & point : result.trajectory.points) {
@@ -114,6 +114,19 @@ TEST_F(TimeSequenceTrajectoryOptimizerTest, IgnoresIncomingTrajectorySpeed)
   }
   // Initial v is chord-speed of the first three poses (~8 m/s), not the fake 99 m/s field.
   EXPECT_NEAR(result.trajectory.points.front().longitudinal_velocity_mps, 8.0F, 2.0F);
+}
+
+TEST_F(TimeSequenceTrajectoryOptimizerTest, InitialAccelerationContinuity)
+{
+  TrajectoryOptimizationParams params;
+  TrajectoryOptimizer optimizer(params, vehicle_info_, 1);
+
+  const auto raw = make_noisy_trajectory(8.0, 0.05);
+  constexpr double initial_accel_mps2 = 1.0;
+  const auto result = optimizer.optimize(raw, odometry_, 0.0, initial_accel_mps2, 0);
+  ASSERT_TRUE(result.optimized) << "acados status: " << result.solver_status;
+
+  EXPECT_NEAR(result.trajectory.points.front().acceleration_mps2, initial_accel_mps2, 0.5F);
 }
 
 TEST_F(TimeSequenceTrajectoryOptimizerTest, FallsBackOnShortTrajectory)
@@ -125,7 +138,7 @@ TEST_F(TimeSequenceTrajectoryOptimizerTest, FallsBackOnShortTrajectory)
   short_trajectory.header.frame_id = "map";
   short_trajectory.points.resize(3);
 
-  const auto result = optimizer.optimize(short_trajectory, odometry_, std::nullopt, 0);
+  const auto result = optimizer.optimize(short_trajectory, odometry_, std::nullopt, 0.0, 0);
   EXPECT_FALSE(result.optimized);
   EXPECT_EQ(result.trajectory.points.size(), short_trajectory.points.size());
 }
@@ -136,10 +149,10 @@ TEST_F(TimeSequenceTrajectoryOptimizerTest, WarmStartAcrossCycles)
   TrajectoryOptimizer optimizer(params, vehicle_info_, 1);
 
   const auto raw = make_noisy_trajectory(8.0, 0.15);
-  const auto first = optimizer.optimize(raw, odometry_, 0.0, 0);
+  const auto first = optimizer.optimize(raw, odometry_, 0.0, 0.0, 0);
   ASSERT_TRUE(first.optimized);
 
-  const auto second = optimizer.optimize(raw, odometry_, 0.0, 0);
+  const auto second = optimizer.optimize(raw, odometry_, 0.0, 0.0, 0);
   ASSERT_TRUE(second.optimized);
 }
 
@@ -149,11 +162,11 @@ TEST_F(TimeSequenceTrajectoryOptimizerTest, ClearWarmStartResetsPreviousSolution
   TrajectoryOptimizer optimizer(params, vehicle_info_, 1);
 
   const auto raw = make_noisy_trajectory(8.0, 0.15);
-  const auto first = optimizer.optimize(raw, odometry_, 0.0, 0);
+  const auto first = optimizer.optimize(raw, odometry_, 0.0, 0.0, 0);
   ASSERT_TRUE(first.optimized);
 
   optimizer.clear_warm_start(0);
-  const auto second = optimizer.optimize(raw, odometry_, 0.0, 0);
+  const auto second = optimizer.optimize(raw, odometry_, 0.0, 0.0, 0);
   ASSERT_TRUE(second.optimized);
 }
 

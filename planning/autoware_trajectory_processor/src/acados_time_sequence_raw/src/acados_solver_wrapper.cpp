@@ -40,6 +40,11 @@ static_assert(gen_np == 1, "generated solver NP mismatch, re-run generate_solver
 static_assert(gen_n == opt_horizon, "generated solver N mismatch, re-run generate_solver.py");
 static_assert(gen_ny == opt_nx + opt_nu, "generated solver NY mismatch");
 static_assert(gen_nyn == opt_nx, "generated solver NYN mismatch");
+
+size_t w_index(const size_t row, const size_t col, const size_t ny)
+{
+  return row * ny + col;
+}
 }  // namespace
 
 struct AcadosSolverWrapper::Impl
@@ -74,8 +79,8 @@ AcadosSolverWrapper::AcadosSolverWrapper(
 
   impl_->params = params;
 
-  std::array<double, gen_nu> lbu{params.min_acceleration_mps2, -params.max_steering_rate_rps};
-  std::array<double, gen_nu> ubu{params.max_acceleration_mps2, params.max_steering_rate_rps};
+  std::array<double, gen_nu> lbu{params.min_jerk_mps3, -params.max_steering_rate_rps};
+  std::array<double, gen_nu> ubu{params.max_jerk_mps3, params.max_steering_rate_rps};
   for (size_t stage = 0; stage < gen_n; ++stage) {
     ocp_nlp_constraints_model_set(
       impl_->config, impl_->dims, impl_->in, impl_->out, static_cast<int>(stage), "lbu",
@@ -85,8 +90,10 @@ AcadosSolverWrapper::AcadosSolverWrapper(
       ubu.data());
   }
 
-  std::array<double, 2> lbx{params.min_velocity_mps, -max_steering_angle_rad};
-  std::array<double, 2> ubx{params.max_velocity_mps, max_steering_angle_rad};
+  std::array<double, 3> lbx{
+    params.min_velocity_mps, -max_steering_angle_rad, params.min_acceleration_mps2};
+  std::array<double, 3> ubx{
+    params.max_velocity_mps, max_steering_angle_rad, params.max_acceleration_mps2};
   for (size_t stage = 1; stage <= gen_n; ++stage) {
     ocp_nlp_constraints_model_set(
       impl_->config, impl_->dims, impl_->in, impl_->out, static_cast<int>(stage), "lbx",
@@ -144,16 +151,17 @@ SolverSolution AcadosSolverWrapper::solve(
       w_lon * c * c + w_lat * s * s, w_lon * s * s + w_lat * c * c, (w_lon - w_lat) * c * s};
   };
   std::array<double, gen_ny * gen_ny> stage_weight_matrix{};
-  stage_weight_matrix[2 * gen_ny + 2] = unscale * impl_->params.weight_yaw;
-  stage_weight_matrix[5 * gen_ny + 5] = unscale * impl_->params.weight_acceleration;
-  stage_weight_matrix[6 * gen_ny + 6] = unscale * impl_->params.weight_steering_rate;
+  stage_weight_matrix[w_index(kPsi, kPsi, gen_ny)] = unscale * impl_->params.weight_yaw;
+  stage_weight_matrix[w_index(kYJerk, kYJerk, gen_ny)] = unscale * impl_->params.weight_jerk;
+  stage_weight_matrix[w_index(kYDeltaRate, kYDeltaRate, gen_ny)] =
+    unscale * impl_->params.weight_steering_rate;
   for (size_t stage = 0; stage < gen_n; ++stage) {
-    const double yaw_ref = (stage == 0) ? x0[2] : references[stage - 1].yaw;
+    const double yaw_ref = (stage == 0) ? x0[kPsi] : references[stage - 1].yaw;
     const auto [w_xx, w_yy, w_xy] = position_block(yaw_ref);
-    stage_weight_matrix[0] = unscale * w_xx;
-    stage_weight_matrix[gen_ny + 1] = unscale * w_yy;
-    stage_weight_matrix[1] = unscale * w_xy;
-    stage_weight_matrix[gen_ny] = unscale * w_xy;
+    stage_weight_matrix[w_index(kX, kX, gen_ny)] = unscale * w_xx;
+    stage_weight_matrix[w_index(kY, kY, gen_ny)] = unscale * w_yy;
+    stage_weight_matrix[w_index(kX, kY, gen_ny)] = unscale * w_xy;
+    stage_weight_matrix[w_index(kY, kX, gen_ny)] = unscale * w_xy;
     ocp_nlp_cost_model_set(
       impl_->config, impl_->dims, impl_->in, static_cast<int>(stage), "W",
       stage_weight_matrix.data());
@@ -161,11 +169,11 @@ SolverSolution AcadosSolverWrapper::solve(
   const double terminal_scale = impl_->params.terminal_weight_scale / unscale;
   std::array<double, gen_nyn * gen_nyn> terminal_weight_matrix{};
   const auto [we_xx, we_yy, we_xy] = position_block(references[gen_n - 1].yaw);
-  terminal_weight_matrix[0] = terminal_scale * we_xx;
-  terminal_weight_matrix[gen_nyn + 1] = terminal_scale * we_yy;
-  terminal_weight_matrix[1] = terminal_scale * we_xy;
-  terminal_weight_matrix[gen_nyn] = terminal_scale * we_xy;
-  terminal_weight_matrix[2 * gen_nyn + 2] = terminal_scale * impl_->params.weight_yaw;
+  terminal_weight_matrix[w_index(kX, kX, gen_nyn)] = terminal_scale * we_xx;
+  terminal_weight_matrix[w_index(kY, kY, gen_nyn)] = terminal_scale * we_yy;
+  terminal_weight_matrix[w_index(kX, kY, gen_nyn)] = terminal_scale * we_xy;
+  terminal_weight_matrix[w_index(kY, kX, gen_nyn)] = terminal_scale * we_xy;
+  terminal_weight_matrix[w_index(kPsi, kPsi, gen_nyn)] = terminal_scale * impl_->params.weight_yaw;
   ocp_nlp_cost_model_set(
     impl_->config, impl_->dims, impl_->in, static_cast<int>(gen_n), "W",
     terminal_weight_matrix.data());
@@ -175,12 +183,13 @@ SolverSolution AcadosSolverWrapper::solve(
   ocp_nlp_cost_model_set(impl_->config, impl_->dims, impl_->in, 0, "yref", yref.data());
   for (size_t stage = 1; stage < gen_n; ++stage) {
     const auto & ref = references[stage - 1];
-    yref = {ref.x, ref.y, ref.yaw, 0.0, 0.0, 0.0, 0.0};
+    yref = {ref.x, ref.y, ref.yaw, 0.0, 0.0, 0.0, 0.0, 0.0};
     ocp_nlp_cost_model_set(
       impl_->config, impl_->dims, impl_->in, static_cast<int>(stage), "yref", yref.data());
   }
   const auto & terminal_ref = references[gen_n - 1];
-  std::array<double, gen_nyn> yref_e{terminal_ref.x, terminal_ref.y, terminal_ref.yaw, 0.0, 0.0};
+  std::array<double, gen_nyn> yref_e{
+    terminal_ref.x, terminal_ref.y, terminal_ref.yaw, 0.0, 0.0, 0.0};
   ocp_nlp_cost_model_set(
     impl_->config, impl_->dims, impl_->in, static_cast<int>(gen_n), "yref", yref_e.data());
 

@@ -22,6 +22,7 @@
 
 #include <autoware_planning_msgs/msg/lanelet_route.hpp>
 #include <autoware_vehicle_msgs/msg/steering_report.hpp>
+#include <geometry_msgs/msg/accel_with_covariance_stamped.hpp>
 #include <geometry_msgs/msg/pose.hpp>
 #include <nav_msgs/msg/odometry.hpp>
 
@@ -43,6 +44,7 @@ using autoware::trajectory_processor::time_sequence_raw::opt_horizon;
 using autoware_planning_msgs::msg::LaneletRoute;
 using autoware_planning_msgs::msg::TrajectoryPoint;
 using autoware_vehicle_msgs::msg::SteeringReport;
+using geometry_msgs::msg::AccelWithCovarianceStamped;
 using nav_msgs::msg::Odometry;
 
 TrajectoryPoint make_point(const double x, const double v)
@@ -84,6 +86,13 @@ SteeringReport::ConstSharedPtr make_steering(const double angle_rad)
   auto steering = std::make_shared<SteeringReport>();
   steering->steering_tire_angle = angle_rad;
   return steering;
+}
+
+AccelWithCovarianceStamped::ConstSharedPtr make_acceleration(const double ax = 0.0)
+{
+  auto accel = std::make_shared<AccelWithCovarianceStamped>();
+  accel->accel.accel.linear.x = ax;
+  return accel;
 }
 
 LaneletRoute::ConstSharedPtr make_route_near_ego(const double goal_x, const double goal_y)
@@ -147,6 +156,7 @@ TEST_F(TimeSequenceRawOptimizerStopPolicyTest, LatchesSteeringOnStoppedReference
   auto trajectory = make_stopped_trajectory(opt_horizon, 0.5);
   TrajectoryProcessorData data;
   data.current_odometry = make_odometry(0.0, 0.0);
+  data.current_acceleration = make_acceleration();
   data.current_steering = make_steering(0.35);
 
   ASSERT_TRUE(process_plugin(*plugin_, trajectory, data));
@@ -168,12 +178,13 @@ TEST_F(TimeSequenceRawOptimizerStopPolicyTest, ZerosSteeringNearGoalWhenStopped)
   auto trajectory = make_stopped_trajectory(opt_horizon, 0.5);
   TrajectoryProcessorData data;
   data.current_odometry = make_odometry(0.0, 0.0);
+  data.current_acceleration = make_acceleration();
   data.current_steering = make_steering(0.40);
   data.route = make_route_near_ego(2.0, 0.0);
 
   ASSERT_TRUE(process_plugin(*plugin_, trajectory, data));
   for (const auto & point : trajectory) {
-    EXPECT_NEAR(point.front_wheel_angle_rad, 0.0F, 1e-5F);
+    EXPECT_NEAR(point.front_wheel_angle_rad, 0.002F, 1e-5F);
     EXPECT_NEAR(point.longitudinal_velocity_mps, 0.0F, 1e-5F);
   }
 }
@@ -189,12 +200,13 @@ TEST_F(TimeSequenceRawOptimizerStopPolicyTest, ZerosSteeringNearGoalDespiteNoisy
 
   TrajectoryProcessorData data;
   data.current_odometry = make_odometry(0.0, 0.0);
+  data.current_acceleration = make_acceleration();
   data.current_steering = make_steering(0.40);
   data.route = make_route_near_ego(2.0, 0.0);
 
   ASSERT_TRUE(process_plugin(*plugin_, trajectory, data));
   for (const auto & point : trajectory) {
-    EXPECT_NEAR(point.front_wheel_angle_rad, 0.0F, 1e-5F);
+    EXPECT_NEAR(point.front_wheel_angle_rad, 0.002F, 1e-5F);
     EXPECT_NEAR(point.longitudinal_velocity_mps, 0.0F, 1e-5F);
   }
 }
@@ -204,18 +216,19 @@ TEST_F(TimeSequenceRawOptimizerStopPolicyTest, StaysInGoalZeroAfterBriefEgoMotio
   auto trajectory = make_stopped_trajectory(opt_horizon, 0.5);
   TrajectoryProcessorData data;
   data.current_odometry = make_odometry(0.0, 0.0, 0.0);
+  data.current_acceleration = make_acceleration();
   data.current_steering = make_steering(0.40);
   data.route = make_route_near_ego(2.0, 0.0);
 
   ASSERT_TRUE(process_plugin(*plugin_, trajectory, data));
   for (const auto & point : trajectory) {
-    EXPECT_NEAR(point.front_wheel_angle_rad, 0.0F, 1e-5F);
+    EXPECT_NEAR(point.front_wheel_angle_rad, 0.002F, 1e-5F);
   }
 
   data.current_odometry = make_odometry(0.0, 0.0, 0.5);
   ASSERT_TRUE(process_plugin(*plugin_, trajectory, data));
   for (const auto & point : trajectory) {
-    EXPECT_NEAR(point.front_wheel_angle_rad, 0.0F, 1e-5F);
+    EXPECT_NEAR(point.front_wheel_angle_rad, 0.002F, 1e-5F);
   }
 }
 

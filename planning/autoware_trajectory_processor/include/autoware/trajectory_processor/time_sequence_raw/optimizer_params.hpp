@@ -24,7 +24,7 @@ struct TrajectoryOptimizationParams
   double weight_longitudinal{0.5};
   double weight_lateral{0.5};
   double weight_yaw{0.05};
-  double weight_acceleration{0.1};
+  double weight_jerk{0.1};
   double weight_steering_rate{10.0};
   double terminal_weight_scale{2.5};
 
@@ -33,6 +33,8 @@ struct TrajectoryOptimizationParams
 
   double min_acceleration_mps2{-4.0};
   double max_acceleration_mps2{3.0};
+  double min_jerk_mps3{-5.0};
+  double max_jerk_mps3{5.0};
   double max_steering_rate_rps{1.0};
 
   double max_lateral_acceleration_mps2{3.0};

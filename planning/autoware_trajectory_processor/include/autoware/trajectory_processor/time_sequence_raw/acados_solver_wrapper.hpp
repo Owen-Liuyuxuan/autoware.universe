@@ -25,9 +25,25 @@ namespace autoware::trajectory_processor::time_sequence_raw
 {
 
 constexpr size_t opt_horizon = 80;
-constexpr size_t opt_nx = 5;  // x, y, yaw, velocity, steering angle
-constexpr size_t opt_nu = 2;  // acceleration, steering rate
+constexpr size_t opt_nx = 6;  // x, y, yaw, velocity, steering angle, acceleration
+constexpr size_t opt_nu = 2;  // jerk, steering rate
 constexpr double opt_dt_s = 0.1;
+
+// State indices in the acados model.
+constexpr size_t kX = 0;
+constexpr size_t kY = 1;
+constexpr size_t kPsi = 2;
+constexpr size_t kV = 3;
+constexpr size_t kDelta = 4;
+constexpr size_t kA = 5;
+
+// Input indices in the acados model.
+constexpr size_t kJerk = 0;
+constexpr size_t kDeltaRate = 1;
+
+// LINEAR_LS output indices: y = [x, y, psi, v, delta, a, jerk, delta_rate].
+constexpr size_t kYJerk = opt_nx + kJerk;
+constexpr size_t kYDeltaRate = opt_nx + kDeltaRate;
 
 /// Per-stage tracking reference (positions in the solver's local frame).
 /// Only pose is tracked: incoming trajectory speed is ignored.
